@@ -138,6 +138,30 @@ function coerceDate(value: Date | string | null | undefined) {
   return value instanceof Date ? value : new Date(value);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function monitorNextCheckAtFrom(value: unknown) {
+  const monitor = recordValue(value);
+  const nextCheckAt = monitor?.nextCheckAt;
+  return typeof nextCheckAt === "string" || nextCheckAt instanceof Date ? coerceDate(nextCheckAt) : null;
+}
+
+function hasFutureScheduledMonitor(issue: IssueRow, now: Date) {
+  const stateMonitor = recordValue(recordValue(issue.executionState)?.monitor);
+  const stateStatus = stateMonitor?.status;
+  const stateAllowsSuppression = stateStatus === undefined || stateStatus === "scheduled";
+  if (!stateAllowsSuppression) return false;
+
+  const policyMonitor = recordValue(recordValue(issue.executionPolicy)?.monitor);
+  const nextCheckAt =
+    coerceDate(issue.monitorNextCheckAt) ??
+    monitorNextCheckAtFrom(policyMonitor) ??
+    monitorNextCheckAtFrom(stateMonitor);
+  return Boolean(nextCheckAt && nextCheckAt.getTime() > now.getTime());
+}
+
 function buildThresholds(overrides?: Partial<ProductivityReviewThresholds>): ProductivityReviewThresholds {
   return {
     noCommentStreakRuns: readPositiveInteger(
@@ -475,13 +499,16 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
       ? Math.max(0, now.getTime() - activeStartedAt.getTime())
       : null;
 
-    const noComment = noCommentStreak >= thresholds.noCommentStreakRuns;
-    const longActive = elapsedMs !== null && elapsedMs >= thresholds.longActiveMs;
     const highChurn =
       runCountLastHour >= thresholds.highChurnHourly ||
       assigneeRunCommentCountLastHour >= thresholds.highChurnHourly ||
       runCountLastSixHours >= thresholds.highChurnSixHours ||
       assigneeRunCommentCountLastSixHours >= thresholds.highChurnSixHours;
+    const noComment = noCommentStreak >= thresholds.noCommentStreakRuns;
+    const rawLongActive = elapsedMs !== null && elapsedMs >= thresholds.longActiveMs;
+    const monitorWaitingWithoutRunEvidence =
+      hasFutureScheduledMonitor(sourceIssue, now) && activeRunCount === 0 && !highChurn;
+    const longActive = rawLongActive && !monitorWaitingWithoutRunEvidence;
     const trigger = choosePrimaryTrigger({ noComment, longActive, highChurn });
     if (!trigger) return null;
 
