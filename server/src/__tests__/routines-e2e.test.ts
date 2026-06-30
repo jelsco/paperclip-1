@@ -343,10 +343,9 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
 
   it("repairs execution policy on a completed routine execution issue without 500s", async () => {
     const { companyId, agentId, projectId, userId } = await seedFixture();
-    const managerAgentId = randomUUID();
-    const managerRunId = randomUUID();
+    const assigneeRunId = randomUUID();
     await db.insert(agents).values({
-      id: managerAgentId,
+      id: randomUUID(),
       companyId,
       name: "Engineering Manager",
       role: "engineering-manager",
@@ -357,9 +356,9 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       permissions: {},
     });
     await db.insert(heartbeatRuns).values({
-      id: managerRunId,
+      id: assigneeRunId,
       companyId,
-      agentId: managerAgentId,
+      agentId,
       status: "running",
       invocationSource: "manual",
       startedAt: new Date(),
@@ -367,9 +366,9 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
 
     const app = await createApp({
       type: "agent",
-      agentId: managerAgentId,
+      agentId,
       companyId,
-      runId: managerRunId,
+      runId: assigneeRunId,
       source: "agent_jwt",
     });
     const boardApp = await createApp({
@@ -379,15 +378,6 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       isInstanceAdmin: false,
       companyIds: [companyId],
     });
-
-    const access = accessService(db);
-    const managerMembership = await access.ensureMembership(companyId, "agent", managerAgentId, "member", "active");
-    await access.setMemberPermissions(
-      companyId,
-      managerMembership.id,
-      ["tasks:manage_active_checkouts", "issue:read", "issue:mutate"].map((permissionKey) => ({ permissionKey })),
-      userId,
-    );
 
     const createRes = await request(boardApp)
       .post(`/api/companies/${companyId}/routines`)
@@ -432,12 +422,39 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       },
     };
 
+    const wrapperPatchRes = await request(app)
+      .patch(`/api/issues/${runRes.body.linkedIssueId}`)
+      .send({ issue: policyPatch });
+
+    expect(wrapperPatchRes.status, JSON.stringify(wrapperPatchRes.body)).toBe(400);
+
     const agentPatchRes = await request(app)
       .patch(`/api/issues/${runRes.body.linkedIssueId}`)
       .send(policyPatch);
 
-    expect(agentPatchRes.status, JSON.stringify(agentPatchRes.body)).toBe(403);
-    expect(agentPatchRes.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(agentPatchRes.status, JSON.stringify(agentPatchRes.body)).toBe(200);
+    expect(agentPatchRes.body).toMatchObject({
+      id: runRes.body.linkedIssueId,
+      originKind: "routine_execution",
+      projectId: null,
+      status: "done",
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [
+          expect.objectContaining({
+            type: "review",
+            participants: [
+              expect.objectContaining({
+                type: "agent",
+                agentId,
+              }),
+            ],
+          }),
+        ],
+      },
+    });
+    expect(agentPatchRes.body.executionState).toBeNull();
 
     const patchRes = await request(boardApp)
       .patch(`/api/issues/${runRes.body.linkedIssueId}`)
