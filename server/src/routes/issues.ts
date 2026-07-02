@@ -1311,6 +1311,26 @@ export function issueRoutes(
     return decision.allowed;
   }
 
+  async function isCeoCompanyGovernanceActor(req: Request, companyId: string) {
+    if (req.actor.type !== "agent" || !req.actor.agentId || req.actor.companyId !== companyId) {
+      return false;
+    }
+    const actorAgent = await agentsSvc.getById(req.actor.agentId);
+    return Boolean(actorAgent && actorAgent.companyId === companyId && actorAgent.role === "ceo");
+  }
+
+  function isGovernanceSweepCommentBody(body: unknown) {
+    return typeof body === "string" && body.includes("<!-- rr-sweep -->");
+  }
+
+  async function canPostGovernanceSweepComment(
+    req: Request,
+    issue: { companyId: string },
+    body: unknown,
+  ) {
+    return isGovernanceSweepCommentBody(body) && await isCeoCompanyGovernanceActor(req, issue.companyId);
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
@@ -4496,13 +4516,14 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    const releaseAllowedByGovernance = await isCeoCompanyGovernanceActor(req, existing.companyId);
+    if (!releaseAllowedByGovernance && !(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     const actorRunId = requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !actorRunId) return;
 
     const released = await svc.release(
       id,
-      req.actor.type === "agent" ? req.actor.agentId : undefined,
+      req.actor.type === "agent" && !releaseAllowedByGovernance ? req.actor.agentId : undefined,
       actorRunId,
     );
     if (!released) {
@@ -5107,7 +5128,8 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    const governanceSweepComment = await canPostGovernanceSweepComment(req, issue, req.body.body);
+    if (!governanceSweepComment && !(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!assertStructuredCommentFieldsAllowed(req, res, {
       presentation: req.body.presentation,
       metadata: req.body.metadata,
@@ -5122,13 +5144,24 @@ export function issueRoutes(
     const reopenRequested = req.body.reopen === true;
     const resumeRequested = req.body.resume === true;
     const interruptRequested = req.body.interrupt === true;
-    if (resumeRequested === true && !(await assertExplicitResumeIntentAllowed(req, res, issue))) return;
-    if (resumeRequested !== true && reopenRequested === true && req.actor.type === "agent") {
+    const governanceAppendOnlyClosedComment =
+      governanceSweepComment &&
+      isClosedIssueStatus(issue.status) &&
+      req.actor.type === "agent" &&
+      issue.assigneeAgentId !== null &&
+      issue.assigneeAgentId !== req.actor.agentId &&
+      !reopenRequested &&
+      !resumeRequested &&
+      !interruptRequested;
+    const effectiveReopenRequested = governanceAppendOnlyClosedComment ? false : reopenRequested;
+    const effectiveResumeRequested = governanceAppendOnlyClosedComment ? false : resumeRequested;
+    if (effectiveResumeRequested === true && !(await assertExplicitResumeIntentAllowed(req, res, issue))) return;
+    if (effectiveResumeRequested !== true && effectiveReopenRequested === true && req.actor.type === "agent") {
       if (!(await assertExplicitResumeIntentAllowed(req, res, issue))) return;
     }
     const isClosed = isClosedIssueStatus(issue.status);
     const isBlocked = issue.status === "blocked";
-    const explicitMoveToTodoRequested = reopenRequested || resumeRequested === true;
+    const explicitMoveToTodoRequested = effectiveReopenRequested || effectiveResumeRequested === true;
     const scheduledRetryForHumanComment =
       shouldHumanCommentResumeInProgressScheduledRetry({
         hasComment: true,

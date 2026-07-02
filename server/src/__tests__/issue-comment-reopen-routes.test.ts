@@ -12,6 +12,7 @@ const mockIssueService = vi.hoisted(() => ({
   findMentionedAgents: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
+  release: vi.fn(),
 }));
 
 const mockAccessService = vi.hoisted(() => ({
@@ -229,6 +230,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.findMentionedAgents.mockReset();
     mockIssueService.listWakeableBlockedDependents.mockReset();
     mockIssueService.getWakeableParentAfterChildCompletion.mockReset();
+    mockIssueService.release.mockReset();
     mockAccessService.canUser.mockReset();
     mockAccessService.decide.mockReset();
     mockAccessService.hasPermission.mockReset();
@@ -307,6 +309,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+    mockIssueService.release.mockResolvedValue(null);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
     mockAccessService.canUser.mockResolvedValue(false);
     mockAccessService.decide.mockImplementation(async (input: { action?: string }) => {
@@ -541,6 +544,102 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("allows CEO governance sweep comments on cross-assignee closed issues without reopening", async () => {
+    const ceoAgentId = "33333333-3333-4333-8333-333333333333";
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockAgentService.getById.mockResolvedValue({
+      id: ceoAgentId,
+      companyId: "company-1",
+      role: "ceo",
+    });
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-1",
+      issueId: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      body: "Stale: no real activity in 7d. <!-- rr-sweep -->",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      authorAgentId: ceoAgentId,
+      authorUserId: null,
+    });
+
+    const res = await request(await installActor(createApp(), agentActor(ceoAgentId)))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Stale: no real activity in 7d. <!-- rr-sweep -->" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockAgentService.getById).toHaveBeenCalledWith(ceoAgentId);
+    expect(mockAccessService.decide).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "tasks:manage_active_checkouts" }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("rejects cross-assignee comments without the governance sweep marker", async () => {
+    const ceoAgentId = "33333333-3333-4333-8333-333333333333";
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockAgentService.getById.mockResolvedValue({
+      id: ceoAgentId,
+      companyId: "company-1",
+      role: "ceo",
+    });
+
+    const res = await request(await installActor(createApp(), agentActor(ceoAgentId)))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Stale: no real activity in 7d." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
+  it("allows CEO governance release on cross-assignee issues", async () => {
+    const ceoAgentId = "33333333-3333-4333-8333-333333333333";
+    const released = { ...makeIssue("todo"), assigneeAgentId: null };
+    mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
+    mockIssueService.release.mockResolvedValue(released);
+    mockAgentService.getById.mockResolvedValue({
+      id: ceoAgentId,
+      companyId: "company-1",
+      role: "ceo",
+    });
+
+    const res = await request(await installActor(createApp(), agentActor(ceoAgentId)))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/release")
+      .send({});
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.getById).toHaveBeenCalledWith(ceoAgentId);
+    expect(mockAccessService.decide).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "tasks:manage_active_checkouts" }),
+    );
+    expect(mockIssueService.release).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      undefined,
+      "run-1",
+    );
+  });
+
+  it("rejects non-CEO governance release on cross-assignee issues", async () => {
+    const peerAgentId = "33333333-3333-4333-8333-333333333333";
+    mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
+    mockAgentService.getById.mockResolvedValue({
+      id: peerAgentId,
+      companyId: "company-1",
+      role: "engineer",
+    });
+
+    const res = await request(await installActor(createApp(), agentActor(peerAgentId)))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/release")
+      .send({});
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.error).toBe("Issue is checked out by another agent");
+    expect(mockIssueService.release).not.toHaveBeenCalled();
   });
 
   it("moves assigned blocked issues back to todo via POST comments", async () => {
