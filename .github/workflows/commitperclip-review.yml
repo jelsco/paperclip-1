@@ -37,13 +37,17 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
-        if: secrets.COMMITPERCLIP_KEY != ''
         run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
+          if [ -z "${COMMITPERCLIP_KEY:-}" ]; then
+            TOKEN="$GITHUB_TOKEN"
+          else
+            TOKEN=$(node .github/scripts/get-bot-token.mjs)
+          fi
           echo "::add-mask::$TOKEN"
           echo "value=$TOKEN" >> $GITHUB_OUTPUT
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Run quality gates
         id: quality
