@@ -44,12 +44,14 @@ const mockAgentInstructionsService = vi.hoisted(() => ({
 
 const mockCompanySkillService = vi.hoisted(() => ({
   listRuntimeSkillEntries: vi.fn(),
+  resolveRequestedSkillEntries: vi.fn(),
   resolveRequestedSkillKeys: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
   resolveAdapterConfigForRuntime: vi.fn(),
   normalizeAdapterConfigForPersistence: vi.fn(async (_companyId: string, config: Record<string, unknown>) => config),
+  syncEnvBindingsForTarget: vi.fn(),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
@@ -61,6 +63,13 @@ const mockAdapter = vi.hoisted(() => ({
   listSkills: vi.fn(),
   syncSkills: vi.fn(),
 }));
+
+function expectResponseId(value: unknown): string {
+  expect(value).toEqual(expect.any(String));
+  expect(value).not.toBe("");
+  expect(value).not.toBe("undefined");
+  return String(value);
+}
 
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentCreated: mockTrackAgentCreated,
@@ -86,6 +95,10 @@ vi.mock("../services/index.js", () => ({
   secretService: () => mockSecretService,
   syncInstructionsBundleConfigFromFilePath: mockSyncInstructionsBundleConfigFromFilePath,
   workspaceOperationService: () => mockWorkspaceOperationService,
+}));
+
+vi.mock("../services/secrets.js", () => ({
+  secretService: () => mockSecretService,
 }));
 
 vi.mock("../adapters/index.js", () => ({
@@ -119,6 +132,10 @@ function registerModuleMocks() {
     secretService: () => mockSecretService,
     syncInstructionsBundleConfigFromFilePath: mockSyncInstructionsBundleConfigFromFilePath,
     workspaceOperationService: () => mockWorkspaceOperationService,
+  }));
+
+  vi.doMock("../services/secrets.js", () => ({
+    secretService: () => mockSecretService,
   }));
 
   vi.doMock("../adapters/index.js", () => ({
@@ -241,13 +258,12 @@ describe.sequential("agent skill routes", () => {
       agent: makeAgent("claude_local"),
     });
     mockSecretService.resolveAdapterConfigForRuntime.mockResolvedValue({ config: { env: {} } });
+    mockSecretService.syncEnvBindingsForTarget.mockResolvedValue(undefined);
     mockCompanySkillService.listRuntimeSkillEntries.mockResolvedValue([
       {
         key: "paperclipai/paperclip/paperclip",
         runtimeName: "paperclip",
         source: "/tmp/paperclip",
-        required: true,
-        requiredReason: "required",
       },
     ]);
     mockCompanySkillService.resolveRequestedSkillKeys.mockImplementation(
@@ -257,6 +273,13 @@ describe.sequential("agent skill routes", () => {
             ? "paperclipai/paperclip/paperclip"
             : value,
         ),
+    );
+    mockCompanySkillService.resolveRequestedSkillEntries.mockImplementation(
+      async (_companyId: string, requested: Array<{ key: string; versionId?: string | null }>) =>
+        requested.map((entry) => ({
+          key: entry.key === "paperclip" ? "paperclipai/paperclip/paperclip" : entry.key,
+          versionId: entry.versionId ?? null,
+        })),
     );
     mockAdapter.listSkills.mockResolvedValue({
       adapterType: "claude_local",
@@ -338,6 +361,10 @@ describe.sequential("agent skill routes", () => {
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      materializeMissing: false,
+      versionSelections: expect.any(Map),
+    }));
     expect(mockAdapter.listSkills).toHaveBeenCalledWith(
       expect.objectContaining({
         adapterType: "claude_local",
@@ -366,6 +393,10 @@ describe.sequential("agent skill routes", () => {
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      materializeMissing: false,
+      versionSelections: expect.any(Map),
+    }));
   });
 
   it("passes ACPX Claude config through the agent skill listing route", async () => {
@@ -392,9 +423,10 @@ describe.sequential("agent skill routes", () => {
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", {
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
       materializeMissing: false,
-    });
+      versionSelections: expect.any(Map),
+    }));
     expect(mockAdapter.listSkills).toHaveBeenCalledWith(
       expect.objectContaining({
         adapterType: "acpx_local",
@@ -461,7 +493,7 @@ describe.sequential("agent skill routes", () => {
     );
   });
 
-  it("keeps runtime materialization for persistent skill adapters", async () => {
+  it("skips runtime materialization when listing persistent skill adapters", async () => {
     mockAgentService.getById.mockResolvedValue(makeAgent("cursor"));
     mockAdapter.listSkills.mockResolvedValue({
       adapterType: "cursor",
@@ -479,6 +511,10 @@ describe.sequential("agent skill routes", () => {
     );
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockCompanySkillService.listRuntimeSkillEntries).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      materializeMissing: false,
+      versionSelections: expect.any(Map),
+    }));
   });
 
   it("skips runtime materialization when syncing Claude skills", async () => {
@@ -525,6 +561,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentService.create).toHaveBeenCalledWith(
       "company-1",
       expect.objectContaining({
@@ -538,7 +575,7 @@ describe.sequential("agent skill routes", () => {
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        agentId: "11111111-1111-4111-8111-111111111111",
+        agentId: createdAgentId,
         agentRole: "engineer",
       }),
     );
@@ -555,6 +592,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(res.body).toMatchObject({
       role: "security",
     });
@@ -567,7 +605,7 @@ describe.sequential("agent skill routes", () => {
     expect(mockTrackAgentCreated).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        agentId: "11111111-1111-4111-8111-111111111111",
+        agentId: createdAgentId,
         agentRole: "security",
       }),
     );
@@ -589,13 +627,15 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
+      createdAgentId,
       expect.objectContaining({
         adapterConfig: expect.objectContaining({
           instructionsBundleMode: "managed",
           instructionsEntryFile: "AGENTS.md",
-          instructionsFilePath: "/tmp/11111111-1111-4111-8111-111111111111/instructions/AGENTS.md",
+          instructionsRootPath: `/tmp/${createdAgentId}/instructions`,
+          instructionsFilePath: `/tmp/${createdAgentId}/instructions/AGENTS.md`,
         }),
       }),
     );
@@ -637,9 +677,10 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "11111111-1111-4111-8111-111111111111",
+        id: createdAgentId,
         role: "ceo",
         adapterType: "claude_local",
       }),
@@ -664,10 +705,11 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createdAgentId = expectResponseId(res.body.id);
     await vi.waitFor(() => {
       expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
         expect.objectContaining({
-          id: "11111111-1111-4111-8111-111111111111",
+          id: createdAgentId,
           role: "engineer",
           adapterType: "claude_local",
         }),
@@ -687,6 +729,13 @@ describe.sequential("agent skill routes", () => {
         expect.any(Object),
         expect.objectContaining({
           "AGENTS.md": expect.stringContaining("confirmation:{issueId}:plan:{revisionId}"),
+        }),
+        expect.any(Object),
+      );
+      expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({
+          "AGENTS.md": expect.stringContaining("skills/paperclip/scripts/paperclip-upload-artifact.sh"),
         }),
         expect.any(Object),
       );
@@ -783,6 +832,10 @@ describe.sequential("agent skill routes", () => {
       });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const approvalInput = mockApprovalService.create.mock.calls.at(-1)?.[1] as
+      | { payload?: { agentId?: string; adapterConfig?: Record<string, unknown> } }
+      | undefined;
+    const hiredAgentId = expectResponseId(approvalInput?.payload?.agentId);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       "company-1",
       expect.objectContaining({
@@ -790,14 +843,12 @@ describe.sequential("agent skill routes", () => {
           adapterConfig: expect.objectContaining({
             instructionsBundleMode: "managed",
             instructionsEntryFile: "AGENTS.md",
-            instructionsFilePath: "/tmp/11111111-1111-4111-8111-111111111111/instructions/AGENTS.md",
+            instructionsRootPath: `/tmp/${hiredAgentId}/instructions`,
+            instructionsFilePath: `/tmp/${hiredAgentId}/instructions/AGENTS.md`,
           }),
         }),
       }),
     );
-    const approvalInput = mockApprovalService.create.mock.calls.at(-1)?.[1] as
-      | { payload?: { adapterConfig?: Record<string, unknown> } }
-      | undefined;
     expect(approvalInput?.payload?.adapterConfig?.promptTemplate).toBeUndefined();
   });
 
