@@ -11,6 +11,13 @@ export type IssueLivenessState =
   | "invalid_review_participant"
   | "in_review_without_action_path";
 
+export interface IssueLivenessScheduledMonitorInput {
+  executionPolicy?: unknown;
+  executionState?: unknown;
+  monitorNextCheckAt?: Date | string | null;
+  monitorAttemptCount?: number | null;
+}
+
 export interface IssueLivenessIssueInput {
   id: string;
   companyId: string;
@@ -163,13 +170,13 @@ function readDateMs(value: unknown): number | null {
   return Number.isNaN(time) ? null : time;
 }
 
-function monitorFromIssue(issue: IssueLivenessIssueInput) {
+function monitorFromIssue(issue: IssueLivenessScheduledMonitorInput) {
   const policyMonitor = readRecord(readRecord(issue.executionPolicy)?.monitor);
   const stateMonitor = readRecord(readRecord(issue.executionState)?.monitor);
   return { policyMonitor, stateMonitor };
 }
 
-function hasScheduledMonitor(issue: IssueLivenessIssueInput, nowMs: number) {
+export function hasScheduledIssueMonitor(issue: IssueLivenessScheduledMonitorInput, nowMs: number) {
   const nextCheckAtMs = readDateMs(issue.monitorNextCheckAt);
   if (nextCheckAtMs === null || nextCheckAtMs <= nowMs) return false;
 
@@ -401,7 +408,7 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
 
   function hasExplicitWaitingPath(issue: IssueLivenessIssueInput) {
     return Boolean(issue.assigneeUserId) ||
-      hasScheduledMonitor(issue, nowMs) ||
+      hasScheduledIssueMonitor(issue, nowMs) ||
       hasActiveExecutionPath(issue.companyId, issue.id, activeRuns, queuedWakeRequests) ||
       hasWaitingPath(issue.companyId, issue.id, pendingInteractions) ||
       hasWaitingPath(issue.companyId, issue.id, pendingApprovals) ||

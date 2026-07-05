@@ -126,6 +126,15 @@ pnpm test:release-smoke
 
 Run the browser suites only when your change touches them or when you are explicitly verifying CI/release flows.
 
+> **⚠️ Memory safety — do NOT run raw `vitest` or a workspace package's bare `npm test`/`pnpm test`.**
+> Raw `vitest --run` forks one worker per CPU core (16 on this host) and each worker can grow to ~3 GB RSS, which exhausts the 32 GB machine and OOM-kills the box (this caused a hard crash on 2026-05-30). Always run the suite through the repo-root wrapper, which bounds concurrency:
+>
+> ```sh
+> pnpm test            # routes to test:run -> scripts/run-vitest-stable.mjs (grouped/serialized forks)
+> ```
+>
+> If you must run a single file, scope it through the wrapper or pass an explicit cap, e.g. `vitest run <file> --pool=forks --poolOptions.forks.maxForks=2`. Never invoke bare `vitest --run` across the whole suite, and never `cd` into a sub-package and run its unbounded `npm test`.
+
 For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
 
 Run this full check before claiming repo work done in a PR-ready hand-off, or when the change scope is broad enough that targeted checks are not sufficient:

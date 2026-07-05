@@ -61,6 +61,7 @@ import {
 } from "./origins.js";
 import {
   classifyIssueGraphLiveness,
+  hasScheduledIssueMonitor,
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import {
@@ -2874,6 +2875,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       skipped: 0,
       issueIds: [] as string[],
     };
+    const nowMs = Date.now();
 
     for (const issue of candidates) {
       const executionState = issue.status === "in_review"
@@ -2911,6 +2913,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
+        result.skipped += 1;
+        continue;
+      }
+
+      if (hasScheduledIssueMonitor(issue, nowMs)) {
         result.skipped += 1;
         continue;
       }
