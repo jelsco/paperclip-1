@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
-import { issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { agents, environments, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import {
   findWorkspaceCommandDefinition,
   matchWorkspaceRuntimeServiceToCommand,
@@ -33,6 +33,7 @@ import { assertCanManageExecutionWorkspaceRuntimeServices } from "./workspace-ru
 import { appendWithCap } from "../adapters/utils.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { forbidden } from "../errors.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 
@@ -44,6 +45,60 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+
+  function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
+    const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+      ? environment.config as Record<string, unknown>
+      : null;
+    return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+  }
+
+  function executionWorkspacePatchTouchesBoundarySelectors(body: Record<string, unknown>): string[] {
+    return [
+      "baseRef",
+      "branchName",
+      "config",
+      "cwd",
+      "metadata",
+      "providerRef",
+      "repoUrl",
+    ].filter((key) => Object.prototype.hasOwnProperty.call(body, key));
+  }
+
+  async function assertNoOsIdentityExecutionWorkspaceSelectorMutation(input: {
+    req: Request;
+    companyId: string;
+    executionWorkspaceId: string;
+    changedPaths: string[];
+  }): Promise<boolean> {
+    if (input.req.actor.type !== "agent" || input.changedPaths.length === 0) return true;
+    const rows = await db
+      .select({
+        environmentDriver: environments.driver,
+        environmentConfig: environments.config,
+      })
+      .from(issues)
+      .innerJoin(agents, and(eq(agents.id, issues.assigneeAgentId), eq(agents.companyId, issues.companyId)))
+      .innerJoin(environments, eq(environments.id, agents.defaultEnvironmentId))
+      .where(and(
+        eq(issues.companyId, input.companyId),
+        eq(issues.executionWorkspaceId, input.executionWorkspaceId),
+      ));
+    if (!rows.some((row) => isOsIdentitySshEnvironment({
+      driver: row.environmentDriver,
+      config: row.environmentConfig,
+    }))) {
+      return true;
+    }
+    resForbiddenOsIdentityWorkspaceSelectors(input.changedPaths);
+    return false;
+  }
+
+  function resForbiddenOsIdentityWorkspaceSelectors(paths: string[]): never {
+    throw forbidden(
+      `Agents cannot mutate execution workspace selectors linked to os_identity agents: ${paths.sort().join(", ")}`,
+    );
+  }
 
   async function assertExecutionWorkspaceReadAllowed(req: Request, res: Response, companyId: string) {
     const decision = await access.decide({
@@ -507,6 +562,14 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
         metadata: req.body.metadata,
       }),
     );
+    if (!(await assertNoOsIdentityExecutionWorkspaceSelectorMutation({
+      req,
+      companyId: existing.companyId,
+      executionWorkspaceId: existing.id,
+      changedPaths: executionWorkspacePatchTouchesBoundarySelectors(req.body as Record<string, unknown>),
+    }))) {
+      return;
+    }
     const patch: Record<string, unknown> = {
       ...(req.body.name === undefined ? {} : { name: req.body.name }),
       ...(req.body.cwd === undefined ? {} : { cwd: req.body.cwd }),

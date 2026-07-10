@@ -36,6 +36,7 @@ interface SpawnTarget {
   command: string;
   args: string[];
   cwd?: string;
+  stdinPrefix?: string;
   cleanup?: () => Promise<void>;
 }
 
@@ -2004,6 +2005,7 @@ async function resolveSpawnTarget(
       command: sshResolved,
       args: spawnTarget.args,
       cwd: process.cwd(),
+      stdinPrefix: spawnTarget.stdinPrefix,
       cleanup: spawnTarget.cleanup,
     };
   }
@@ -2861,7 +2863,7 @@ export async function runChildProcess(
           env: mergedEnv,
           detached: process.platform !== "win32",
           shell: false,
-          stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          stdio: [target.stdinPrefix != null || opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
@@ -2973,10 +2975,15 @@ export async function runChildProcess(
         });
 
         const stdin = child.stdin;
-        if (opts.stdin != null && stdin) {
+        if ((target.stdinPrefix != null || opts.stdin != null) && stdin) {
           void spawnPersistPromise.finally(() => {
             if (child.killed || stdin.destroyed) return;
-            stdin.write(opts.stdin as string);
+            if (target.stdinPrefix != null) {
+              stdin.write(target.stdinPrefix);
+            }
+            if (opts.stdin != null) {
+              stdin.write(opts.stdin as string);
+            }
             stdin.end();
           });
         }

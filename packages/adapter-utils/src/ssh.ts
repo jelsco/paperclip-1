@@ -24,6 +24,7 @@ export interface SshConnectionConfig {
   privateKey: string | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
+  isolationMode?: "os_identity" | null;
 }
 
 export interface SshCommandResult {
@@ -52,23 +53,16 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd?.trim() || defaultCwd;
-      const envEntries = Object.entries(commandInput.env ?? {})
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-      const envPrefix = envEntries.length > 0
-        ? `env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} `
-        : "";
-      const exportPrefix = envEntries.length > 0
-        ? envEntries.map(([key, value]) => `export ${key}=${shellQuote(value)};`).join(" ") + " "
-        : "";
       const commandScript = command === "sh" || command === "bash"
         ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
-          ? `${exportPrefix}${args[1]}`
-          : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
-        : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
+          ? args[1]
+          : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
+        : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
       const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {
         const result = await runSshCommand(input.spec, remoteCommand, {
+          env: commandInput.env,
           stdin: commandInput.stdin,
           timeoutMs: commandInput.timeoutMs,
           maxBuffer: maxBufferBytes,
@@ -154,6 +148,63 @@ function isValidShellEnvKey(value: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
+function sshEnvEntries(env: Record<string, string> | undefined): Array<[string, string]> {
+  const entries = Object.entries(env ?? {})
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  for (const [key] of entries) {
+    if (!isValidShellEnvKey(key)) {
+      throw new Error(`Invalid SSH environment variable key: ${key}`);
+    }
+  }
+  return entries;
+}
+
+function encodeSshEnvFrame(entries: Array<[string, string]>): string | null {
+  if (entries.length === 0) return null;
+  const payload = entries
+    .map(([key, value]) => `${key} ${Buffer.from(value, "utf8").toString("base64")}`)
+    .join("\n") + "\n";
+  return `${Buffer.byteLength(payload, "utf8")}\n${payload}`;
+}
+
+function buildSshEnvBootstrapScript() {
+  return [
+    'IFS= read -r __paperclip_env_len',
+    'case "$__paperclip_env_len" in ""|*[!0-9]*) echo "Invalid Paperclip SSH env frame" >&2; exit 96;; esac',
+    '__paperclip_env_file="$(mktemp)"',
+    'trap \'rm -f "$__paperclip_env_file"\' EXIT',
+    'dd bs=1 count="$__paperclip_env_len" of="$__paperclip_env_file" >/dev/null 2>&1',
+    'while read -r __paperclip_env_key __paperclip_env_b64; do [ -n "$__paperclip_env_key" ] || continue; __paperclip_env_value="$(printf "%s" "$__paperclip_env_b64" | base64 -d)"; export "$__paperclip_env_key=$__paperclip_env_value"; done < "$__paperclip_env_file"',
+    'rm -f "$__paperclip_env_file"',
+    'trap - EXIT',
+  ].join(" && ");
+}
+
+export function prepareSshInvocation(
+  config: SshConnectionConfig,
+  remoteCommand: string,
+  options: { env?: Record<string, string> } = {},
+): { remoteScript: string; stdinPrefix?: string } {
+  const entries = sshEnvEntries(options.env);
+  const stdinPrefix = encodeSshEnvFrame(entries) ?? undefined;
+  const profileScript = config.isolationMode === "os_identity"
+    ? null
+    : [
+      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
+    ].join(" && ");
+  const parts = [
+    profileScript,
+    stdinPrefix ? buildSshEnvBootstrapScript() : null,
+    `exec sh -c ${shellQuote(remoteCommand)}`,
+  ].filter((part): part is string => Boolean(part));
+  return {
+    remoteScript: parts.join(" && "),
+    stdinPrefix,
+  };
+}
+
 export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionSpec | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -181,6 +232,7 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
     knownHosts: typeof parsed.knownHosts === "string" && parsed.knownHosts.length > 0 ? parsed.knownHosts : null,
     strictHostKeyChecking:
       typeof parsed.strictHostKeyChecking === "boolean" ? parsed.strictHostKeyChecking : true,
+    isolationMode: parsed.isolationMode === "os_identity" ? "os_identity" : null,
   };
 }
 
@@ -375,6 +427,8 @@ async function createSshAuthArgs(
     "BatchMode=yes",
     "-o",
     "ConnectTimeout=10",
+    "-o",
+    "IdentitiesOnly=yes",
     "-o",
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
   ];
@@ -601,6 +655,36 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
       preserveTimestamps: true,
     });
   }));
+}
+
+function assertPathContained(root: string, candidate: string, label: string) {
+  const relative = path.relative(root, candidate);
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return;
+  throw new Error(`${label} escapes upload root: ${candidate}`);
+}
+
+async function assertNoEscapingSymlinks(rootDir: string): Promise<void> {
+  const realRoot = await fs.realpath(rootDir);
+  async function walk(current: string) {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        let target: string;
+        try {
+          target = await fs.realpath(fullPath);
+        } catch (error) {
+          throw new Error(`Upload contains dangling symlink: ${fullPath}`);
+        }
+        assertPathContained(realRoot, target, `Upload symlink ${fullPath}`);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      }
+    }
+  }
+  await walk(realRoot);
 }
 
 async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGitWorkspaceSnapshot | null> {
@@ -1158,38 +1242,23 @@ export async function runSshCommand(
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const sshArgs = [...auth.args];
-    const envEntries = Object.entries(options.env ?? {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-    for (const [key] of envEntries) {
-      if (!isValidShellEnvKey(key)) {
-        throw new Error(`Invalid SSH environment variable key: ${key}`);
-      }
-    }
-
-    // Mirror buildSshSpawnTarget: source login profiles first, then run
-    // `env KEY=VAL cmd` so user-supplied identity overrides win over anything
-    // a profile re-exports. Without this, a remote profile that resets HOME
-    // / NVM_DIR / etc. would silently undo the explicit env passed in here.
-    const envArgs = envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`);
-    const remoteScript = [
-      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
-      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; fi',
-      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
-      envArgs.length > 0
-        ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
-        : `exec sh -c ${shellQuote(remoteCommand)}`,
-    ].join(" && ");
+    const prepared = prepareSshInvocation(config, remoteCommand, {
+      env: options.env,
+    });
 
     sshArgs.push(
       "-p",
       String(config.port),
       `${config.username}@${config.host}`,
-      `sh -c ${shellQuote(remoteScript)}`,
+      `sh -c ${shellQuote(prepared.remoteScript)}`,
     );
 
-    return options.stdin != null
+    const stdin = prepared.stdinPrefix != null || options.stdin != null
+      ? `${prepared.stdinPrefix ?? ""}${options.stdin ?? ""}`
+      : undefined;
+    return stdin != null
       ? await spawnText("ssh", sshArgs, {
-          stdin: options.stdin,
+          stdin,
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         })
@@ -1210,41 +1279,33 @@ export async function buildSshSpawnTarget(input: {
 }): Promise<{
   command: string;
   args: string[];
+  stdinPrefix?: string;
   cleanup: () => Promise<void>;
 }> {
-  for (const key of Object.keys(input.env)) {
-    if (!isValidShellEnvKey(key)) {
-      throw new Error(`Invalid SSH environment variable key: ${key}`);
-    }
-  }
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.env)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
-  const remoteScript = [
-    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
+  const remoteCommand = [
     'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"',
     '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true',
     `cd ${shellQuote(input.spec.remoteCwd)}`,
-    envArgs.length > 0
-      ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
-      : `exec ${remoteCommandParts}`,
+    `exec ${remoteCommandParts}`,
   ].join(" && ");
+  const prepared = prepareSshInvocation(input.spec, remoteCommand, {
+    env: input.env,
+  });
 
   sshArgs.push(
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteScript)}`,
+    `sh -c ${shellQuote(prepared.remoteScript)}`,
   );
 
   return {
     command: "ssh",
     args: sshArgs,
+    stdinPrefix: prepared.stdinPrefix,
     cleanup: auth.cleanup,
   };
 }
@@ -1258,6 +1319,9 @@ export async function syncDirectoryToSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
+  if (input.spec.isolationMode === "os_identity" || input.followSymlinks !== true) {
+    await assertNoEscapingSymlinks(input.localDir);
+  }
   const auth = await createSshAuthArgs(input.spec);
   const sshArgs = [
     ...auth.args,
@@ -1499,6 +1563,11 @@ export async function prepareWorkspaceForSshExecution(input: {
   const gitSnapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
 
   if (gitSnapshot) {
+    if (input.spec.isolationMode === "os_identity") {
+      throw new Error(
+        "os_identity SSH workspaces cannot use Git-backed whole-repository sync; provide a sanitized non-Git workspace export.",
+      );
+    }
     await importGitWorkspaceToSsh({
       spec: input.spec,
       localDir: input.localDir,

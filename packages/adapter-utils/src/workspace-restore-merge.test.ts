@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -80,5 +80,31 @@ describe("workspace restore merge", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("rejects restore symlinks that resolve outside the source workspace", async () => {
+    if (process.platform === "win32") return;
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-restore-merge-"));
+    cleanupDirs.push(rootDir);
+
+    const targetDir = path.join(rootDir, "target");
+    const sourceDir = path.join(rootDir, "source");
+    const outsideDir = path.join(rootDir, "outside");
+    await mkdir(targetDir, { recursive: true });
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(path.join(outsideDir, "secret.txt"), "operator secret\n", "utf8");
+    await symlink(path.join(outsideDir, "secret.txt"), path.join(sourceDir, "secret.txt"));
+
+    const baseline = await captureDirectorySnapshot(targetDir, { exclude: [] });
+
+    await expect(
+      mergeDirectoryWithBaseline({
+        baseline,
+        sourceDir,
+        targetDir,
+      }),
+    ).rejects.toThrow(/absolute symlink|escaping workspace|outside workspace/);
   });
 });

@@ -60,6 +60,19 @@ export function projectRoutes(db: Db) {
     });
   }
 
+  function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
+    const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+      ? environment.config as Record<string, unknown>
+      : null;
+    return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+  }
+
+  async function environmentIdUsesOsIdentity(environmentId: string | null | undefined) {
+    if (!environmentId) return false;
+    const environment = await environmentsSvc.getById(environmentId);
+    return isOsIdentitySshEnvironment(environment);
+  }
+
   function readProjectPolicyEnvironmentId(policy: unknown): string | null | undefined {
     if (!policy || typeof policy !== "object" || !("environmentId" in policy)) {
       return undefined;
@@ -93,6 +106,72 @@ export function projectRoutes(db: Db) {
       throw conflict("Project shortname is ambiguous in this company. Use the project ID.");
     }
     return resolved.project?.id ?? rawId;
+  }
+
+  async function assertNoProjectOsIdentitySelectorMutation(input: {
+    req: Request;
+    companyId: string;
+    existingExecutionWorkspacePolicy: unknown;
+    body: Record<string, unknown>;
+  }): Promise<boolean> {
+    if (input.req.actor.type !== "agent") return true;
+    const changedPaths = [
+      Object.prototype.hasOwnProperty.call(input.body, "env") ? "env" : null,
+      Object.prototype.hasOwnProperty.call(input.body, "executionWorkspacePolicy") ? "executionWorkspacePolicy" : null,
+    ].filter((path): path is string => path !== null);
+    if (changedPaths.length === 0) return true;
+
+    const existingEnvironmentId = readProjectPolicyEnvironmentId(input.existingExecutionWorkspacePolicy);
+    const requestedEnvironmentId = Object.prototype.hasOwnProperty.call(input.body, "executionWorkspacePolicy")
+      ? readProjectPolicyEnvironmentId(input.body.executionWorkspacePolicy)
+      : undefined;
+    if (
+      !(await environmentIdUsesOsIdentity(existingEnvironmentId))
+      && !(await environmentIdUsesOsIdentity(requestedEnvironmentId))
+    ) {
+      return true;
+    }
+
+    resForbiddenProjectOsIdentitySelectors(changedPaths);
+    return false;
+  }
+
+  function projectWorkspaceBoundarySelectorPaths(body: Record<string, unknown>): string[] {
+    return [
+      "baseRef",
+      "branchName",
+      "cwd",
+      "metadata",
+      "providerRef",
+      "repoUrl",
+      "runtimeConfig",
+      "runtimeServices",
+    ].filter((key) => Object.prototype.hasOwnProperty.call(body, key));
+  }
+
+  async function assertNoProjectWorkspaceOsIdentitySelectorMutation(input: {
+    req: Request;
+    companyId: string;
+    executionWorkspacePolicy: unknown;
+    body: Record<string, unknown>;
+  }): Promise<boolean> {
+    if (input.req.actor.type !== "agent") return true;
+    const changedPaths = projectWorkspaceBoundarySelectorPaths(input.body);
+    if (changedPaths.length === 0) return true;
+    if (!(await environmentIdUsesOsIdentity(
+      readProjectPolicyEnvironmentId(input.executionWorkspacePolicy),
+    ))) {
+      return true;
+    }
+    throw forbidden(
+      `Agents cannot mutate project workspace selectors for os_identity environments: ${changedPaths.sort().join(", ")}`,
+    );
+  }
+
+  function resForbiddenProjectOsIdentitySelectors(paths: string[]): never {
+    throw forbidden(
+      `Agents cannot mutate project execution selectors for os_identity environments: ${paths.sort().join(", ")}`,
+    );
   }
 
   async function assertProjectReadAllowed(req: Request, res: Response, project: { id: string; companyId: string }) {
@@ -238,6 +317,14 @@ export function projectRoutes(db: Db) {
       req,
       collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
     );
+    if (!(await assertNoProjectOsIdentitySelectorMutation({
+      req,
+      companyId: existing.companyId,
+      existingExecutionWorkspacePolicy: existing.executionWorkspacePolicy,
+      body,
+    }))) {
+      return;
+    }
     await assertProjectEnvironmentSelection(
       existing.companyId,
       readProjectPolicyEnvironmentId(body.executionWorkspacePolicy),
@@ -309,6 +396,14 @@ export function projectRoutes(db: Db) {
       req,
       collectProjectWorkspaceCommandPaths(req.body),
     );
+    if (!(await assertNoProjectWorkspaceOsIdentitySelectorMutation({
+      req,
+      companyId: existing.companyId,
+      executionWorkspacePolicy: existing.executionWorkspacePolicy,
+      body: req.body as Record<string, unknown>,
+    }))) {
+      return;
+    }
     const workspace = await svc.createWorkspace(id, req.body);
     if (!workspace) {
       res.status(422).json({ error: "Invalid project workspace payload" });
@@ -351,6 +446,14 @@ export function projectRoutes(db: Db) {
         req,
         collectProjectWorkspaceCommandPaths(req.body),
       );
+      if (!(await assertNoProjectWorkspaceOsIdentitySelectorMutation({
+        req,
+        companyId: existing.companyId,
+        executionWorkspacePolicy: existing.executionWorkspacePolicy,
+        body: req.body as Record<string, unknown>,
+      }))) {
+        return;
+      }
       const workspaceExists = (await svc.listWorkspaces(id)).some((workspace) => workspace.id === workspaceId);
       if (!workspaceExists) {
         res.status(404).json({ error: "Project workspace not found" });

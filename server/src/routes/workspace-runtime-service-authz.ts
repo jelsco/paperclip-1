@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { agents, environments, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { isUuidLike } from "@paperclipai/shared";
 import type { Request } from "express";
 import { forbidden } from "../errors.js";
@@ -59,6 +59,45 @@ async function listReportingSubtreeAgentIds(db: Db, companyId: string, actorAgen
   return [...visited];
 }
 
+function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
+  const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+    ? environment.config as Record<string, unknown>
+    : null;
+  return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+}
+
+async function isAgentDefaultEnvironmentOsIdentity(db: Db, companyId: string, agentId: string | null | undefined) {
+  if (!agentId) return false;
+  const row = await db
+    .select({
+      environmentDriver: environments.driver,
+      environmentConfig: environments.config,
+    })
+    .from(agents)
+    .leftJoin(environments, eq(environments.id, agents.defaultEnvironmentId))
+    .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)))
+    .then((rows) => rows[0] ?? null);
+  return isOsIdentitySshEnvironment(row
+    ? { driver: row.environmentDriver ?? "", config: row.environmentConfig }
+    : null);
+}
+
+async function assertNoOsIdentityWorkspaceRuntimeServiceBypass(input: {
+  db: Db;
+  companyId: string;
+  actorAgentId: string;
+  linkedAssigneeAgentIds: Array<string | null | undefined>;
+}) {
+  if (await isAgentDefaultEnvironmentOsIdentity(input.db, input.companyId, input.actorAgentId)) {
+    throw forbidden("Agents using os_identity environments cannot manage local workspace runtime services");
+  }
+  for (const assigneeAgentId of input.linkedAssigneeAgentIds) {
+    if (await isAgentDefaultEnvironmentOsIdentity(input.db, input.companyId, assigneeAgentId)) {
+      throw forbidden("Workspace runtime services are disabled for issues assigned to os_identity agents");
+    }
+  }
+}
+
 async function assertAgentCanManageRuntimeServicesForWorkspace(
   db: Db,
   req: Request,
@@ -112,8 +151,8 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     runExecutionPolicy,
   });
 
-  if (actorAgent.role === "ceo" && actorRuntimeTrust.kind === "standard") {
-    return;
+  if (await isAgentDefaultEnvironmentOsIdentity(db, input.companyId, actorAgent.id)) {
+    throw forbidden("Agents using os_identity environments cannot manage local workspace runtime services");
   }
 
   const runIssueId = readRunIssueId(runContext);
@@ -123,6 +162,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
           id: issues.id,
           companyId: issues.companyId,
           projectId: issues.projectId,
+          assigneeAgentId: issues.assigneeAgentId,
           executionPolicy: issues.executionPolicy,
           projectExecutionWorkspacePolicy: projects.executionWorkspacePolicy,
         })
@@ -135,7 +175,9 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
         .then((rows) => rows[0] ?? null)
     : null;
 
-  if (runScopedIssue) {
+  const isStandardCeoActor = actorAgent.role === "ceo" && actorRuntimeTrust.kind === "standard";
+
+  if (runScopedIssue && !isStandardCeoActor) {
     assertLowTrustCanManageRuntimeForIssue({
       actorAgent,
       issue: runScopedIssue,
@@ -163,6 +205,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
       id: issues.id,
       companyId: issues.companyId,
       projectId: issues.projectId,
+      assigneeAgentId: issues.assigneeAgentId,
       executionPolicy: issues.executionPolicy,
       projectExecutionWorkspacePolicy: projects.executionWorkspacePolicy,
     })
@@ -174,6 +217,20 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
       inArray(issues.status, WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES),
       workspaceScopeCondition,
     ));
+
+  await assertNoOsIdentityWorkspaceRuntimeServiceBypass({
+    db,
+    companyId: input.companyId,
+    actorAgentId: actorAgent.id,
+    linkedAssigneeAgentIds: [
+      runScopedIssue?.assigneeAgentId,
+      ...linkedScopeIssues.map((issue) => issue.assigneeAgentId),
+    ],
+  });
+
+  if (isStandardCeoActor) {
+    return;
+  }
 
   for (const linkedScopeIssue of linkedScopeIssues) {
     assertLowTrustCanManageRuntimeForIssue({
@@ -194,6 +251,7 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
       id: issues.id,
       companyId: issues.companyId,
       projectId: issues.projectId,
+      assigneeAgentId: issues.assigneeAgentId,
       executionPolicy: issues.executionPolicy,
       projectExecutionWorkspacePolicy: projects.executionWorkspacePolicy,
     })
@@ -209,6 +267,12 @@ async function assertAgentCanManageRuntimeServicesForWorkspace(
     .then((rows) => rows[0] ?? null);
 
   if (linkedIssue) {
+    await assertNoOsIdentityWorkspaceRuntimeServiceBypass({
+      db,
+      companyId: input.companyId,
+      actorAgentId: actorAgent.id,
+      linkedAssigneeAgentIds: [linkedIssue.assigneeAgentId],
+    });
     assertLowTrustCanManageRuntimeForIssue({
       actorAgent,
       issue: linkedIssue,

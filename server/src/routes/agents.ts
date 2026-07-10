@@ -893,6 +893,103 @@ export function agentRoutes(
     }
   }
 
+  function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
+    const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+      ? environment.config as Record<string, unknown>
+      : null;
+    return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+  }
+
+  async function agentUsesOsIdentityEnvironment(agent: {
+    companyId: string;
+    defaultEnvironmentId?: string | null;
+  }): Promise<boolean> {
+    if (!agent.defaultEnvironmentId) return false;
+    const environment = await environmentsSvc.getById(agent.defaultEnvironmentId);
+    return isOsIdentitySshEnvironment(environment);
+  }
+
+  const OS_IDENTITY_ADAPTER_SELECTOR_KEYS = new Set([
+    "args",
+    "cacheDir",
+    "claudeConfigDir",
+    "codexHome",
+    "command",
+    "configDir",
+    "cwd",
+    "dataDir",
+    "env",
+    "environmentId",
+    "executable",
+    "homeDir",
+    "processEnv",
+    "runtimeDir",
+    "shell",
+    "stateDir",
+    "workspaceDir",
+    "workspaceRoot",
+    "workspaceStrategy",
+  ]);
+
+  function collectOsIdentityAdapterSelectorMutationPaths(
+    adapterConfig: Record<string, unknown> | null | undefined,
+    prefix: string,
+  ): string[] {
+    if (!adapterConfig) return [];
+    return Object.keys(adapterConfig)
+      .filter((key) => OS_IDENTITY_ADAPTER_SELECTOR_KEYS.has(key))
+      .map((key) => `${prefix}.${key}`);
+  }
+
+  function collectOsIdentityRuntimeSelectorMutationPaths(runtimeConfig: unknown): string[] {
+    const paths: string[] = [];
+    for (const entry of listRuntimeModelProfileAdapterConfigs(runtimeConfig)) {
+      paths.push(...collectOsIdentityAdapterSelectorMutationPaths(entry.adapterConfig, entry.path));
+    }
+    return paths;
+  }
+
+  async function assertNoAgentOsIdentitySelfReconfiguration(input: {
+    req: Request;
+    existing: {
+      id: string;
+      companyId: string;
+      adapterType: string;
+      defaultEnvironmentId?: string | null;
+    };
+    patchData: Record<string, unknown>;
+    replaceAdapterConfig: boolean;
+  }): Promise<void> {
+    if (input.req.actor.type !== "agent") return;
+    if (!(await agentUsesOsIdentityEnvironment(input.existing))) return;
+
+    const paths: string[] = [];
+    if (hasOwn(input.patchData, "adapterType") && input.patchData.adapterType !== input.existing.adapterType) {
+      paths.push("adapterType");
+    }
+    if (
+      hasOwn(input.patchData, "defaultEnvironmentId")
+      && input.patchData.defaultEnvironmentId !== input.existing.defaultEnvironmentId
+    ) {
+      paths.push("defaultEnvironmentId");
+    }
+    const adapterConfig = asRecord(input.patchData.adapterConfig);
+    if (adapterConfig) {
+      if (input.replaceAdapterConfig) {
+        paths.push("adapterConfig");
+      } else {
+        paths.push(...collectOsIdentityAdapterSelectorMutationPaths(adapterConfig, "adapterConfig"));
+      }
+    }
+    paths.push(...collectOsIdentityRuntimeSelectorMutationPaths(input.patchData.runtimeConfig));
+
+    if (paths.length > 0) {
+      throw forbidden(
+        `Agents using os_identity environments cannot mutate execution boundary selectors: ${paths.sort().join(", ")}`,
+      );
+    }
+  }
+
   function hasOwn(value: object, key: string): boolean {
     return Object.hasOwn(value, key);
   }
@@ -2817,6 +2914,12 @@ export function agentRoutes(
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
+    await assertNoAgentOsIdentitySelfReconfiguration({
+      req,
+      existing,
+      patchData,
+      replaceAdapterConfig,
+    });
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {

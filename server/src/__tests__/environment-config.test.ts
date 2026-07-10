@@ -105,6 +105,57 @@ describe("environment config helpers", () => {
     });
   });
 
+  it("accepts os_identity SSH config only with loopback host, rrpc user, pinned host key, and pinned key secret", () => {
+    const config = normalizeEnvironmentConfig({
+      driver: "ssh",
+      config: {
+        isolationMode: "os_identity",
+        host: "127.0.0.1",
+        port: 22,
+        username: "rrpc-agent-1",
+        remoteWorkspacePath: "/home/rrpc-agent-1/workspace",
+        privateKeySecretRef: {
+          type: "secret_ref",
+          secretId: "11111111-1111-1111-1111-111111111111",
+          version: 7,
+        },
+        knownHosts: "[127.0.0.1]:22 ssh-ed25519 AAAATEST",
+        strictHostKeyChecking: true,
+      },
+    });
+
+    expect(config).toMatchObject({
+      isolationMode: "os_identity",
+      host: "127.0.0.1",
+      username: "rrpc-agent-1",
+      privateKeySecretRef: {
+        version: 7,
+      },
+      strictHostKeyChecking: true,
+    });
+  });
+
+  it("rejects os_identity SSH config with latest secret versions or non-loopback selectors", () => {
+    expect(() =>
+      normalizeEnvironmentConfig({
+        driver: "ssh",
+        config: {
+          isolationMode: "os_identity",
+          host: "ssh.example.test",
+          username: "operator",
+          remoteWorkspacePath: "/srv/paperclip/workspace",
+          privateKeySecretRef: {
+            type: "secret_ref",
+            secretId: "11111111-1111-1111-1111-111111111111",
+            version: "latest",
+          },
+          knownHosts: "",
+          strictHostKeyChecking: false,
+        },
+      }),
+    ).toThrow("os_identity SSH environments must use a loopback host");
+  });
+
   it("normalizes sandbox config into its canonical stored shape", () => {
     const config = normalizeEnvironmentConfig({
       driver: "sandbox",

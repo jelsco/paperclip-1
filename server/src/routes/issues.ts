@@ -1349,6 +1349,54 @@ export function issueRoutes(
   const feedbackExportService = opts?.feedbackExportService;
   const environmentsSvc = environmentService(db);
 
+  function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
+    const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+      ? environment.config as Record<string, unknown>
+      : null;
+    return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+  }
+
+  async function agentUsesOsIdentityEnvironment(agentId: string | null | undefined, companyId: string): Promise<boolean> {
+    if (!agentId) return false;
+    const agent = await agentsSvc.getById(agentId);
+    if (!agent || agent.companyId !== companyId || !agent.defaultEnvironmentId) return false;
+    const environment = await environmentsSvc.getById(agent.defaultEnvironmentId);
+    return isOsIdentitySshEnvironment(environment);
+  }
+
+  async function assertNoIssueOsIdentitySelfReconfiguration(input: {
+    req: Request;
+    companyId: string;
+    assigneeAgentId: string | null | undefined;
+    updateFields: Record<string, unknown>;
+  }): Promise<boolean> {
+    if (input.req.actor.type !== "agent") return true;
+    if (!(await agentUsesOsIdentityEnvironment(input.assigneeAgentId, input.companyId))) return true;
+    const paths = [
+      Object.prototype.hasOwnProperty.call(input.updateFields, "assigneeAdapterOverrides")
+        ? "assigneeAdapterOverrides"
+        : null,
+      Object.prototype.hasOwnProperty.call(input.updateFields, "executionWorkspaceSettings")
+        ? "executionWorkspaceSettings"
+        : null,
+      Object.prototype.hasOwnProperty.call(input.updateFields, "executionWorkspacePreference")
+        ? "executionWorkspacePreference"
+        : null,
+      Object.prototype.hasOwnProperty.call(input.updateFields, "executionWorkspaceId")
+        ? "executionWorkspaceId"
+        : null,
+    ].filter((path): path is string => path !== null);
+    if (paths.length === 0) return true;
+    throwIssueOsIdentitySelectorMutation(paths);
+    return false;
+  }
+
+  function throwIssueOsIdentitySelectorMutation(paths: string[]): never {
+    throw forbidden(
+      `Agents cannot mutate execution boundary selectors for issues assigned to os_identity agents: ${paths.sort().join(", ")}`,
+    );
+  }
+
   async function queueTaskWatchdogEvaluation(issue: { id: string; companyId: string }, runId?: string | null) {
     await taskWatchdogsSvc
       .reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: runId ?? null })
@@ -6015,6 +6063,14 @@ export function issueRoutes(
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
       normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId;
+    if (!(await assertNoIssueOsIdentitySelfReconfiguration({
+      req,
+      companyId: existing.companyId,
+      assigneeAgentId: requestedAssigneeAgentId,
+      updateFields,
+    }))) {
+      return;
+    }
     const explicitMoveToTodoRequested = reopenRequested || resumeRequested === true;
     const recoveryRelevantSourceMutationRequested =
       req.body.status !== undefined ||

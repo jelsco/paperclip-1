@@ -36,7 +36,8 @@ const secretRefSchema = z.object({
   version: z.union([z.literal("latest"), z.number().int().positive()]).optional().default("latest"),
 }).strict();
 
-const sshEnvironmentConfigSchema = z.object({
+const sshEnvironmentConfigBaseSchema = z.object({
+  isolationMode: z.literal("os_identity").optional(),
   host: z.string({ required_error: "SSH environments require a host." }).trim().min(1, "SSH environments require a host."),
   port: z.coerce.number().int().min(1).max(65535).default(22),
   username: z.string({ required_error: "SSH environments require a username." }).trim().min(1, "SSH environments require a username."),
@@ -56,14 +57,80 @@ const sshEnvironmentConfigSchema = z.object({
   strictHostKeyChecking: z.boolean().optional().default(true),
 }).strict();
 
-const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigSchema.extend({
+function validateSshEnvironmentConfig(
+  value: {
+    isolationMode?: "os_identity";
+    host: string;
+    username: string;
+    strictHostKeyChecking: boolean;
+    knownHosts: string | null;
+    privateKey?: string | null;
+    privateKeySecretRef: { version?: unknown } | null;
+  },
+  ctx: z.RefinementCtx,
+) {
+  if (value.isolationMode !== "os_identity") return;
+  const normalizedHost = value.host.toLowerCase();
+  if (!["localhost", "127.0.0.1", "::1"].includes(normalizedHost)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["host"],
+      message: "os_identity SSH environments must use a loopback host.",
+    });
+  }
+  if (!value.username.startsWith("rrpc-")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["username"],
+      message: "os_identity SSH usernames must use the rrpc- prefix.",
+    });
+  }
+  if (!value.strictHostKeyChecking) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["strictHostKeyChecking"],
+      message: "os_identity SSH environments require strict host key checking.",
+    });
+  }
+  if (!value.knownHosts) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["knownHosts"],
+      message: "os_identity SSH environments require pinned known_hosts data.",
+    });
+  }
+  if (value.privateKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["privateKey"],
+      message: "os_identity SSH environments require a version-pinned privateKeySecretRef, not inline privateKey.",
+    });
+  }
+  if (!value.privateKeySecretRef) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["privateKeySecretRef"],
+      message: "os_identity SSH environments require a version-pinned privateKeySecretRef.",
+    });
+  } else if (typeof value.privateKeySecretRef.version !== "number") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["privateKeySecretRef", "version"],
+      message: "os_identity SSH privateKeySecretRef.version must be a positive integer, not latest.",
+    });
+  }
+}
+
+const sshEnvironmentConfigSchema = sshEnvironmentConfigBaseSchema.superRefine(validateSshEnvironmentConfig);
+
+const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigBaseSchema.extend({
   privateKey: z
     .string()
     .trim()
     .optional()
     .nullable()
     .transform((value) => (value && value.length > 0 ? value : null)),
-}).strict();
+}).strict().superRefine(validateSshEnvironmentConfig);
 
 const sshEnvironmentConfigPersistenceSchema = sshEnvironmentConfigProbeSchema;
 

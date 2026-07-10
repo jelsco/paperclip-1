@@ -12,6 +12,7 @@ export interface LocalEnvironmentConfig {
 }
 
 export interface SshEnvironmentConfig {
+  isolationMode?: "os_identity";
   host: string;
   port: number;
   username: string;

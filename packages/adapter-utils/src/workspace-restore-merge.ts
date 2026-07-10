@@ -106,6 +106,72 @@ function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEnt
   return false;
 }
 
+function pathContained(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function resolveContained(root: string, relative: string, label: string): string {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(resolvedRoot, relative);
+  if (!pathContained(resolvedRoot, resolvedCandidate)) {
+    throw new Error(`${label} escapes workspace root: ${relative}`);
+  }
+  return resolvedCandidate;
+}
+
+async function assertRealPathContained(root: string, candidate: string, label: string): Promise<void> {
+  const resolvedRoot = path.resolve(root);
+  const realRoot = await fs.realpath(resolvedRoot);
+  const realCandidate = await fs.realpath(candidate).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} is dangling or unreadable: ${message}`);
+  });
+  if (!pathContained(realRoot, realCandidate)) {
+    throw new Error(`${label} resolves outside workspace root`);
+  }
+}
+
+async function assertSafeSymlinkPlan(input: {
+  sourceDir: string;
+  targetDir: string;
+  relative: string;
+  entry: Extract<SnapshotEntry, { kind: "symlink" }>;
+}): Promise<void> {
+  if (path.isAbsolute(input.entry.target)) {
+    throw new Error(`Refusing to restore absolute symlink target at ${input.relative}`);
+  }
+
+  const sourcePath = resolveContained(input.sourceDir, input.relative, "Restore source symlink path");
+  const targetPath = resolveContained(input.targetDir, input.relative, "Restore target symlink path");
+  const currentSourceStats = await fs.lstat(sourcePath).catch(() => null);
+  if (!currentSourceStats?.isSymbolicLink()) {
+    throw new Error(`Restore source changed while applying symlink: ${input.relative}`);
+  }
+  const currentTarget = await fs.readlink(sourcePath);
+  if (currentTarget !== input.entry.target) {
+    throw new Error(`Restore source symlink target changed while applying: ${input.relative}`);
+  }
+
+  const sourceTarget = path.resolve(path.dirname(sourcePath), input.entry.target);
+  if (!pathContained(path.resolve(input.sourceDir), sourceTarget)) {
+    throw new Error(`Refusing to restore source symlink escaping workspace at ${input.relative}`);
+  }
+  await assertRealPathContained(input.sourceDir, sourceTarget, `Restore source symlink at ${input.relative}`);
+
+  const targetTarget = path.resolve(path.dirname(targetPath), input.entry.target);
+  if (!pathContained(path.resolve(input.targetDir), targetTarget)) {
+    throw new Error(`Refusing to create target symlink escaping workspace at ${input.relative}`);
+  }
+}
+
+async function assertSafeRestoreSymlinkPlan(source: DirectorySnapshot, sourceDir: string, targetDir: string): Promise<void> {
+  for (const [relative, entry] of source.entries.entries()) {
+    if (entry.kind !== "symlink") continue;
+    await assertSafeSymlinkPlan({ sourceDir, targetDir, relative, entry });
+  }
+}
+
 async function isHolderAlive(lockDir: string): Promise<boolean> {
   try {
     const raw = await fs.readFile(path.join(lockDir, "owner.json"), "utf8");
@@ -171,8 +237,8 @@ export async function withDirectoryMergeLock<T>(
 }
 
 async function copySnapshotEntry(sourceDir: string, targetDir: string, relative: string, entry: SnapshotEntry): Promise<void> {
-  const sourcePath = path.join(sourceDir, relative);
-  const targetPath = path.join(targetDir, relative);
+  const sourcePath = resolveContained(sourceDir, relative, "Restore source path");
+  const targetPath = resolveContained(targetDir, relative, "Restore target path");
 
   if (entry.kind === "dir") {
     const existing = await fs.lstat(targetPath).catch(() => null);
@@ -189,10 +255,16 @@ async function copySnapshotEntry(sourceDir: string, targetDir: string, relative:
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
   if (entry.kind === "symlink") {
+    await assertSafeSymlinkPlan({ sourceDir, targetDir, relative, entry });
     await fs.symlink(entry.target, targetPath);
     return;
   }
 
+  const sourceStats = await fs.lstat(sourcePath);
+  if (!sourceStats.isFile()) {
+    throw new Error(`Restore source changed while copying file: ${relative}`);
+  }
+  await assertRealPathContained(sourceDir, sourcePath, `Restore source file at ${relative}`);
   await fs.copyFile(sourcePath, targetPath, fsConstants.COPYFILE_FICLONE).catch(async () => {
     await fs.copyFile(sourcePath, targetPath);
   });
@@ -217,9 +289,10 @@ export async function mergeDirectoryWithBaseline(input: {
   beforeApply?: () => Promise<void>;
   afterApply?: () => Promise<void>;
 }): Promise<void> {
-  const source = await captureDirectorySnapshot(input.sourceDir, { exclude: input.baseline.exclude });
   await withDirectoryMergeLock(input.targetDir, async () => {
     await input.beforeApply?.();
+    const source = await captureDirectorySnapshot(input.sourceDir, { exclude: input.baseline.exclude });
+    await assertSafeRestoreSymlinkPlan(source, input.sourceDir, input.targetDir);
     const current = await captureDirectorySnapshot(input.targetDir, { exclude: input.baseline.exclude });
     const deletedLeafEntries = [...input.baseline.entries.entries()]
       .filter(([relative, entry]) => entry.kind !== "dir" && !source.entries.has(relative))

@@ -192,6 +192,62 @@ describe("ssh env-lab fixture", () => {
     ).rejects.toThrow("Invalid SSH environment variable key: BAD KEY");
   });
 
+  it("keeps SSH environment values out of argv when constructing spawn targets", async () => {
+    const target = await buildSshSpawnTarget({
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "ssh-user",
+        remoteCwd: "/srv/paperclip/workspace",
+        remoteWorkspacePath: "/srv/paperclip/workspace",
+        privateKey: null,
+        knownHosts: null,
+        strictHostKeyChecking: true,
+      },
+      command: "env",
+      args: [],
+      env: {
+        SECRET_VALUE: "paperclip-secret-token",
+      },
+    });
+
+    expect(target.args.join("\n")).not.toContain("paperclip-secret-token");
+    expect(target.stdinPrefix).toBeTypeOf("string");
+    await target.cleanup();
+  });
+
+  it("rejects Git-backed workspace import for os_identity SSH targets", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
+    cleanupDirs.push(rootDir);
+    const localRepo = path.join(rootDir, "local-workspace");
+
+    await mkdir(localRepo, { recursive: true });
+    await git(localRepo, ["init"]);
+    await git(localRepo, ["checkout", "-b", "main"]);
+    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
+    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localRepo, "tracked.txt"), "tracked\n", "utf8");
+    await git(localRepo, ["add", "tracked.txt"]);
+    await git(localRepo, ["commit", "-m", "initial"]);
+
+    await expect(
+      prepareWorkspaceForSshExecution({
+        spec: {
+          host: "127.0.0.1",
+          port: 22,
+          username: "rrpc-agent-1",
+          remoteCwd: "/home/rrpc-agent-1/workspace",
+          remoteWorkspacePath: "/home/rrpc-agent-1/workspace",
+          privateKey: null,
+          knownHosts: "[127.0.0.1]:22 ssh-ed25519 AAAATEST",
+          strictHostKeyChecking: true,
+          isolationMode: "os_identity",
+        },
+        localDir: localRepo,
+      }),
+    ).rejects.toThrow("os_identity SSH workspaces cannot use Git-backed whole-repository sync");
+  });
+
   it("syncs a local directory into the remote fixture workspace", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
     cleanupDirs.push(rootDir);
@@ -396,6 +452,38 @@ describe("ssh env-lab fixture", () => {
     expect(result.stdout).toContain("regular");
     expect(result.stdout).toContain("{\"token\":\"secret\"}");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("rejects outbound workspace sync when local symlinks escape the upload root", async () => {
+    if (process.platform === "win32") return;
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
+    cleanupDirs.push(rootDir);
+    const outsideDir = path.join(rootDir, "operator-home");
+    const localDir = path.join(rootDir, "local-overlay");
+
+    await mkdir(outsideDir, { recursive: true });
+    await mkdir(localDir, { recursive: true });
+    await writeFile(path.join(outsideDir, "credentials.json"), "{\"token\":\"secret\"}\n", "utf8");
+    await symlink(path.join(outsideDir, "credentials.json"), path.join(localDir, "credentials.json"));
+
+    await expect(
+      syncDirectoryToSsh({
+        spec: {
+          host: "127.0.0.1",
+          port: 22,
+          username: "rrpc-agent-1",
+          remoteCwd: "/home/rrpc-agent-1/workspace",
+          remoteWorkspacePath: "/home/rrpc-agent-1/workspace",
+          privateKey: null,
+          knownHosts: "[127.0.0.1]:22 ssh-ed25519 AAAATEST",
+          strictHostKeyChecking: true,
+          isolationMode: "os_identity",
+        },
+        localDir,
+        remoteDir: "/home/rrpc-agent-1/workspace",
+      }),
+    ).rejects.toThrow("escapes upload root");
+  });
 
   it("round-trips a git workspace through the SSH fixture", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
