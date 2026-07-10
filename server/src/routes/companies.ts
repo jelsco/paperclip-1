@@ -28,6 +28,7 @@ import {
   feedbackService,
   logActivity,
 } from "../services/index.js";
+import { executionAdmissionService } from "../services/execution-admission.js";
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
@@ -41,6 +42,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const budgets = budgetService(db);
   const artifacts = companyArtifactsService(db, storage);
   const feedback = feedbackService(db);
+  const executionAdmission = executionAdmissionService(db);
   const importJobs = new Map<string, ImportJobRecord>();
   const importJobTerminalRetentionMs = 5 * 60 * 1000;
 
@@ -121,6 +123,62 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     assertCompanyAccess(req, companyId);
     const query = companyArtifactsQuerySchema.parse(req.query);
     res.json(await artifacts.list(companyId, query));
+  });
+
+  router.get("/:companyId/execution-admission", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    res.json(await executionAdmission.getState(companyId));
+  });
+
+  router.post("/:companyId/execution-admission/fence", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) throw badRequest("Fence reason is required");
+    if (reason.length > 500) throw badRequest("Fence reason must be 500 characters or fewer");
+
+    const state = await executionAdmission.fence({
+      companyId,
+      reason,
+      userId: req.actor.userId ?? null,
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "company.execution_admission_fenced",
+      entityType: "company",
+      entityId: companyId,
+      details: { version: state.version, reason },
+    });
+    res.json(state);
+  });
+
+  router.post("/:companyId/execution-admission/reopen", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    const version = req.body?.version;
+    if (!token) throw badRequest("Fence token is required");
+    if (!Number.isSafeInteger(version) || version < 1) {
+      throw badRequest("Fence version must be a positive integer");
+    }
+
+    const state = await executionAdmission.reopen({ companyId, token, version });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "company.execution_admission_reopened",
+      entityType: "company",
+      entityId: companyId,
+      details: { fenceVersion: version, version: state.version },
+    });
+    res.json(state);
   });
 
   router.get("/:companyId", async (req, res) => {

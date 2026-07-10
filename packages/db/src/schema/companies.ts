@@ -26,6 +26,13 @@ export const companies = pgTable(
     feedbackDataSharingConsentByUserId: text("feedback_data_sharing_consent_by_user_id"),
     feedbackDataSharingTermsVersion: text("feedback_data_sharing_terms_version"),
     brandColor: text("brand_color"),
+    executionAdmissionFenceVersion: integer("execution_admission_fence_version")
+      .notNull()
+      .default(0),
+    executionAdmissionFencedAt: timestamp("execution_admission_fenced_at", { withTimezone: true }),
+    executionAdmissionFenceTokenHash: text("execution_admission_fence_token_hash"),
+    executionAdmissionFenceReason: text("execution_admission_fence_reason"),
+    executionAdmissionFencedByUserId: text("execution_admission_fenced_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -8,6 +8,9 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockNotifyHireApproved = vi.hoisted(() => vi.fn());
+const mockExecutionAdmissionService = vi.hoisted(() => ({
+  assertOpen: vi.fn(),
+}));
 
 vi.mock("../services/agents.js", () => ({
   agentService: vi.fn(() => mockAgentService),
@@ -15,6 +18,10 @@ vi.mock("../services/agents.js", () => ({
 
 vi.mock("../services/hire-hook.js", () => ({
   notifyHireApproved: mockNotifyHireApproved,
+}));
+
+vi.mock("../services/execution-admission.js", () => ({
+  executionAdmissionService: vi.fn(() => mockExecutionAdmissionService),
 }));
 
 type ApprovalRecord = {
@@ -62,6 +69,13 @@ describe("approvalService resolution idempotency", () => {
     mockAgentService.create.mockResolvedValue({ id: "agent-1" });
     mockAgentService.terminate.mockResolvedValue(undefined);
     mockNotifyHireApproved.mockResolvedValue(undefined);
+    mockExecutionAdmissionService.assertOpen.mockResolvedValue({
+      companyId: "company-1",
+      fenced: false,
+      version: 0,
+      fencedAt: null,
+      reason: null,
+    });
   });
 
   it("treats repeated approve retries as no-ops after another worker resolves the approval", async () => {
@@ -101,6 +115,7 @@ describe("approvalService resolution idempotency", () => {
     const result = await svc.approve("approval-1", "board", "ship it");
 
     expect(result.applied).toBe(true);
+    expect(mockExecutionAdmissionService.assertOpen).toHaveBeenCalledWith("company-1");
     expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith("agent-1");
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
   });
