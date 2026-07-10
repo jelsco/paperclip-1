@@ -375,15 +375,25 @@ describe.sequential("company route cross-company authorization", () => {
     await request(memberApp).patch(`/api/companies/${companyBId}`).send({ description: "Updated" }).expect(200);
     await request(memberApp).patch(`/api/companies/${companyBId}/branding`).send({ brandColor: "#abcdef" }).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/archive`).send({}).expect(200);
-    await request(memberApp).get(`/api/companies/${companyBId}/execution-admission`).expect(200);
-    await request(memberApp)
+    const admissionState = await request(memberApp)
+      .get(`/api/companies/${companyBId}/execution-admission`)
+      .expect(200);
+    expect(admissionState.headers["cache-control"]).toBe("no-store");
+    const fenceResponse = await request(memberApp)
       .post(`/api/companies/${companyBId}/execution-admission/fence`)
       .send({ reason: "cutover" })
       .expect(200);
-    await request(memberApp)
+    expect(fenceResponse.headers["cache-control"]).toBe("no-store");
+    const reopenResponse = await request(memberApp)
       .post(`/api/companies/${companyBId}/execution-admission/reopen`)
       .send({ token: "fence-token", version: 1 })
       .expect(200);
+    expect(reopenResponse.headers["cache-control"]).toBe("no-store");
+    expect(mockExecutionAdmissionService.reopen).toHaveBeenCalledWith({
+      companyId: companyBId,
+      token: "fence-token",
+      version: 1,
+    });
     await request(memberApp).delete(`/api/companies/${companyBId}`).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/export`).send(exportRequest).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/exports/preview`).send(exportRequest).expect(200);
