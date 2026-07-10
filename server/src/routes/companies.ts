@@ -129,6 +129,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
+    res.setHeader("Cache-Control", "no-store");
     res.json(await executionAdmission.getState(companyId));
   });
 
@@ -154,6 +155,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityId: companyId,
       details: { version: state.version, reason },
     });
+    res.setHeader("Cache-Control", "no-store");
     res.json(state);
   });
 
@@ -162,6 +164,11 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     assertCompanyAccess(req, companyId);
     assertBoard(req);
     const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    if (typeof req.body?.token === "string") {
+      // Error logging includes request bodies. Erase the one-time token before
+      // any validation or CAS failure can reach the logger.
+      req.body.token = "[REDACTED]";
+    }
     const version = req.body?.version;
     if (!token) throw badRequest("Fence token is required");
     if (!Number.isSafeInteger(version) || version < 1) {
@@ -178,6 +185,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityId: companyId,
       details: { fenceVersion: version, version: state.version },
     });
+    res.setHeader("Cache-Control", "no-store");
     res.json(state);
   });
 
