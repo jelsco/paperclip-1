@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +31,49 @@ async function git(cwd: string, args: string[]): Promise<string> {
       resolve(stdout.trim());
     });
   });
+}
+
+async function waitForRemoteFile(spec: Awaited<ReturnType<typeof buildSshEnvLabFixtureConfig>>, remotePath: string) {
+  const deadline = Date.now() + 5_000;
+  let lastError: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      const result = await runSshCommand(
+        spec,
+        `[ -f ${JSON.stringify(remotePath)} ] && cat ${JSON.stringify(remotePath)}`,
+        { timeoutMs: 5_000, maxBuffer: 16 * 1024 },
+      );
+      const value = result.stdout.trim();
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Timed out waiting for remote file ${remotePath}`);
+}
+
+function quoteForSh(value: string) {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+async function waitForRemotePidDeath(
+  spec: Awaited<ReturnType<typeof buildSshEnvLabFixtureConfig>>,
+  remotePid: string,
+) {
+  const deadline = Date.now() + 5_000;
+  let lastStatus = "";
+  while (Date.now() < deadline) {
+    const status = await runSshCommand(
+      spec,
+      `if kill -0 ${remotePid} >/dev/null 2>&1; then echo alive; else echo dead; fi`,
+      { timeoutMs: 5_000, maxBuffer: 16 * 1024 },
+    );
+    lastStatus = status.stdout.trim();
+    if (lastStatus === "dead") return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Remote pid ${remotePid} still ${lastStatus || "unknown"}`);
 }
 
 async function startSshEnvLabFixtureOrSkip(statePath: string, label: string) {
@@ -191,6 +234,43 @@ describe("ssh env-lab fixture", () => {
       }),
     ).rejects.toThrow("Invalid SSH environment variable key: BAD KEY");
   });
+
+  it("cleans up supervised os_identity remote setsid descendants after the local SSH child exits", async () => {
+    if (process.platform === "win32") return;
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
+    cleanupDirs.push(rootDir);
+    const statePath = path.join(rootDir, "state.json");
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH remote process-group cleanup test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const spec = { ...config, remoteCwd: started.workspaceDir, isolationMode: "os_identity" as const };
+    const remotePidFile = path.posix.join(started.workspaceDir, "supervised-child.pid");
+    const nestedScript = `trap "" HUP TERM; sleep 60 & echo $! > ${quoteForSh(remotePidFile)}; wait`;
+
+    const target = await buildSshSpawnTarget({
+      spec,
+      command: "sh",
+      args: [
+        "-c",
+        `setsid sh -c ${quoteForSh(nestedScript)} & wait`,
+      ],
+      env: {},
+    });
+    const child = spawn(target.command, target.args, {
+      stdio: [target.stdinPrefix ? "pipe" : "ignore", "ignore", "ignore"],
+    });
+    if (target.stdinPrefix && child.stdin) {
+      child.stdin.end(target.stdinPrefix);
+    }
+
+    const remoteChildPid = await waitForRemoteFile(config, remotePidFile);
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => child.once("close", () => resolve()));
+    await target.cleanup();
+    await waitForRemotePidDeath(config, remoteChildPid);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("keeps SSH environment values out of argv when constructing spawn targets", async () => {
     const target = await buildSshSpawnTarget({

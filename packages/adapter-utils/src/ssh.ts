@@ -205,6 +205,91 @@ export function prepareSshInvocation(
   };
 }
 
+function buildSupervisedSshRemoteCommand(
+  config: SshConnectionConfig,
+  remoteCommand: string,
+): { remoteCommand: string; remoteRunDir: string | null; remoteRunId: string | null } {
+  if (config.isolationMode !== "os_identity") {
+    return { remoteCommand, remoteRunDir: null, remoteRunId: null };
+  }
+  const remoteRunId = randomUUID();
+  const remoteRunDir = path.posix.join(
+    config.remoteWorkspacePath,
+    ".paperclip-runtime",
+    "ssh-runs",
+    remoteRunId,
+  );
+  return {
+    remoteRunDir,
+    remoteRunId,
+    remoteCommand: [
+      `__paperclip_run_dir=${shellQuote(remoteRunDir)}`,
+      'rm -rf "$__paperclip_run_dir"',
+      'mkdir -p "$__paperclip_run_dir"',
+      `PAPERCLIP_SSH_RUN_ID=${shellQuote(remoteRunId)} PAPERCLIP_SSH_RUN_DIR=${shellQuote(remoteRunDir)} setsid sh -c ${shellQuote(remoteCommand)} &`,
+      "__paperclip_pid=$!",
+      'printf "%s\\n" "$__paperclip_pid" > "$__paperclip_run_dir/pid"',
+      'wait "$__paperclip_pid"',
+    ].join("\n"),
+  };
+}
+
+async function cleanupSupervisedSshRemoteRun(input: {
+  config: SshConnectionConfig;
+  authArgs: string[];
+  remoteRunDir: string | null;
+  remoteRunId: string | null;
+}): Promise<void> {
+  if (!input.remoteRunDir) return;
+  const cleanupScript = [
+    `__paperclip_run_dir=${shellQuote(input.remoteRunDir)}`,
+    `__paperclip_run_id=${shellQuote(input.remoteRunId ?? "")}`,
+    '__paperclip_pid_file="$__paperclip_run_dir/pid"',
+    'if [ -f "$__paperclip_pid_file" ]; then',
+    '  __paperclip_pid="$(cat "$__paperclip_pid_file" 2>/dev/null || true)"',
+    '  case "$__paperclip_pid" in ""|*[!0-9]*) __paperclip_pid="";; esac',
+    '  if [ -n "$__paperclip_pid" ]; then',
+    '    kill -TERM "-$__paperclip_pid" >/dev/null 2>&1 || kill -TERM "$__paperclip_pid" >/dev/null 2>&1 || true',
+    "    sleep 1",
+    '    kill -KILL "-$__paperclip_pid" >/dev/null 2>&1 || kill -KILL "$__paperclip_pid" >/dev/null 2>&1 || true',
+    "  fi",
+    "fi",
+    'if [ -n "$__paperclip_run_id" ] && [ -d /proc ]; then',
+    '  __paperclip_env_pattern="PAPERCLIP_SSH_RUN_ID=$__paperclip_run_id"',
+    '  __paperclip_pids=""',
+    '  for __paperclip_environ in /proc/[0-9]*/environ; do',
+    '    [ -r "$__paperclip_environ" ] || continue',
+    '    if tr "\\000" "\\n" < "$__paperclip_environ" 2>/dev/null | grep -Fx "$__paperclip_env_pattern" >/dev/null 2>&1; then',
+    '      __paperclip_pid="${__paperclip_environ#/proc/}"',
+    '      __paperclip_pid="${__paperclip_pid%%/*}"',
+    '      case "$__paperclip_pid" in ""|*[!0-9]*|$$) continue;; esac',
+    '      __paperclip_pids="$__paperclip_pids $__paperclip_pid"',
+    "    fi",
+    "  done",
+    '  if [ -n "$__paperclip_pids" ]; then',
+    '    kill -TERM $__paperclip_pids >/dev/null 2>&1 || true',
+    "    sleep 1",
+    '    kill -KILL $__paperclip_pids >/dev/null 2>&1 || true',
+    "  fi",
+    "fi",
+    'rm -rf "$__paperclip_run_dir" >/dev/null 2>&1 || true',
+  ].join("\n");
+  await execFileText(
+    "ssh",
+    [
+      ...input.authArgs,
+      "-p",
+      String(input.config.port),
+      `${input.config.username}@${input.config.host}`,
+      `sh -c ${shellQuote(cleanupScript)}`,
+    ],
+    {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    },
+  ).catch(() => undefined);
+}
+
 export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionSpec | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -1238,11 +1323,18 @@ export async function runSshCommand(
   } = {},
 ): Promise<SshCommandResult> {
   let cleanup: () => Promise<void> = () => Promise.resolve();
+  let cleanupAuthArgs: string[] = [];
+  let remoteRunDir: string | null = null;
+  let remoteRunId: string | null = null;
   try {
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
+    cleanupAuthArgs = auth.args;
     const sshArgs = [...auth.args];
-    const prepared = prepareSshInvocation(config, remoteCommand, {
+    const supervised = buildSupervisedSshRemoteCommand(config, remoteCommand);
+    remoteRunDir = supervised.remoteRunDir;
+    remoteRunId = supervised.remoteRunId;
+    const prepared = prepareSshInvocation(config, supervised.remoteCommand, {
       env: options.env,
     });
 
@@ -1267,6 +1359,12 @@ export async function runSshCommand(
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         });
   } finally {
+    await cleanupSupervisedSshRemoteRun({
+      config,
+      authArgs: cleanupAuthArgs,
+      remoteRunDir,
+      remoteRunId,
+    });
     await cleanup();
   }
 }
@@ -1291,7 +1389,8 @@ export async function buildSshSpawnTarget(input: {
     `cd ${shellQuote(input.spec.remoteCwd)}`,
     `exec ${remoteCommandParts}`,
   ].join(" && ");
-  const prepared = prepareSshInvocation(input.spec, remoteCommand, {
+  const supervised = buildSupervisedSshRemoteCommand(input.spec, remoteCommand);
+  const prepared = prepareSshInvocation(input.spec, supervised.remoteCommand, {
     env: input.env,
   });
 
@@ -1306,7 +1405,15 @@ export async function buildSshSpawnTarget(input: {
     command: "ssh",
     args: sshArgs,
     stdinPrefix: prepared.stdinPrefix,
-    cleanup: auth.cleanup,
+    cleanup: async () => {
+      await cleanupSupervisedSshRemoteRun({
+        config: input.spec,
+        authArgs: auth.args,
+        remoteRunDir: supervised.remoteRunDir,
+        remoteRunId: supervised.remoteRunId,
+      });
+      await auth.cleanup();
+    },
   };
 }
 
