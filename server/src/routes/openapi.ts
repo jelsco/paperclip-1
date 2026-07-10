@@ -661,6 +661,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/members/{memberId}/archive",
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
+  "GET /api/companies/{companyId}/execution-admission",
+  "POST /api/companies/{companyId}/execution-admission/fence",
+  "POST /api/companies/{companyId}/execution-admission/reopen",
   "GET /api/board-api-keys",
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
@@ -1007,6 +1010,53 @@ registry.registerPath({
     body: jsonBody(updateCompanySchema.partial()),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/execution-admission",
+  tags: ["companies"],
+  summary: "Read the company execution-admission fence",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/execution-admission/fence",
+  tags: ["companies"],
+  summary: "Fence new execution admission for a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(z.object({ reason: z.string().trim().min(1).max(500) })),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/execution-admission/reopen",
+  tags: ["companies"],
+  summary: "Reopen execution admission using the captured fence token and version",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(z.object({ token: z.string().trim().min(1), version: z.number().int().positive() })),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registry.registerPath({

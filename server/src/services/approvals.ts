@@ -7,11 +7,13 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { executionAdmissionService } from "./execution-admission.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
   const budgets = budgetService(db);
   const instanceSettings = instanceSettingsService(db);
+  const executionAdmission = executionAdmissionService(db);
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
@@ -39,8 +41,9 @@ export function approvalService(db: Db) {
     targetStatus: "approved" | "rejected",
     decidedByUserId: string,
     decisionNote: string | null | undefined,
+    prefetchedApproval?: ApprovalRecord,
   ): Promise<ResolutionResult> {
-    const existing = await getExistingApproval(id);
+    const existing = prefetchedApproval ?? await getExistingApproval(id);
     if (!canResolveStatuses.has(existing.status)) {
       if (existing.status === targetStatus) {
         return { approval: existing, applied: false };
@@ -115,11 +118,16 @@ export function approvalService(db: Db) {
         .then((rows) => rows[0]),
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
+      const existing = await getExistingApproval(id);
+      if (existing.type === "hire_agent") {
+        await executionAdmission.assertOpen(existing.companyId);
+      }
       const { approval: updated, applied } = await resolveApproval(
         id,
         "approved",
         decidedByUserId,
         decisionNote,
+        existing,
       );
 
       let hireApprovedAgentId: string | null = null;

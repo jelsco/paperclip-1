@@ -9,6 +9,14 @@ import { asString, parseObject } from "../adapters/utils.js";
 
 type ParsedExecutionWorkspaceMode = Exclude<ExecutionWorkspaceMode, "inherit" | "reuse_existing">;
 
+function effectiveIssueSettings(
+  projectPolicy: ProjectExecutionWorkspacePolicy | null,
+  issueSettings: IssueExecutionWorkspaceSettings | null,
+): IssueExecutionWorkspaceSettings | null {
+  if (projectPolicy?.enabled && projectPolicy.allowIssueOverride === false) return null;
+  return issueSettings;
+}
+
 function cloneRecord(value: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
   if (!value) return null;
   return { ...value };
@@ -188,7 +196,7 @@ export function resolveExecutionWorkspaceMode(input: {
   issueSettings: IssueExecutionWorkspaceSettings | null;
   legacyUseProjectWorkspace: boolean | null;
 }): ParsedExecutionWorkspaceMode {
-  const issueMode = input.issueSettings?.mode;
+  const issueMode = effectiveIssueSettings(input.projectPolicy, input.issueSettings)?.mode;
   if (issueMode && issueMode !== "inherit" && issueMode !== "reuse_existing") {
     return issueMode;
   }
@@ -212,18 +220,19 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   legacyUseProjectWorkspace: boolean | null;
 }): Record<string, unknown> {
   const nextConfig = { ...input.agentConfig };
+  const issueSettings = effectiveIssueSettings(input.projectPolicy, input.issueSettings);
   const projectHasPolicy = Boolean(input.projectPolicy?.enabled);
   const issueHasWorkspaceOverrides = Boolean(
-    input.issueSettings?.mode ||
-    input.issueSettings?.workspaceStrategy ||
-    input.issueSettings?.workspaceRuntime,
+    issueSettings?.mode ||
+    issueSettings?.workspaceStrategy ||
+    issueSettings?.workspaceRuntime,
   );
   const hasWorkspaceControl = projectHasPolicy || issueHasWorkspaceOverrides || input.legacyUseProjectWorkspace === false;
 
   if (hasWorkspaceControl) {
     if (input.mode === "isolated_workspace") {
       const strategy =
-        input.issueSettings?.workspaceStrategy ??
+        issueSettings?.workspaceStrategy ??
         input.projectPolicy?.workspaceStrategy ??
         parseExecutionWorkspaceStrategy(nextConfig.workspaceStrategy) ??
         ({ type: "git_worktree" } satisfies ExecutionWorkspaceStrategy);
@@ -234,8 +243,8 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
 
     if (input.mode === "agent_default") {
       delete nextConfig.workspaceRuntime;
-    } else if (input.issueSettings?.workspaceRuntime) {
-      nextConfig.workspaceRuntime = cloneRecord(input.issueSettings.workspaceRuntime) ?? undefined;
+    } else if (issueSettings?.workspaceRuntime) {
+      nextConfig.workspaceRuntime = cloneRecord(issueSettings.workspaceRuntime) ?? undefined;
     } else if (input.projectPolicy?.workspaceRuntime) {
       nextConfig.workspaceRuntime = cloneRecord(input.projectPolicy.workspaceRuntime) ?? undefined;
     }

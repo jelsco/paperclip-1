@@ -1,4 +1,5 @@
 export { companyService } from "./companies.js";
+export { executionAdmissionService, type ExecutionAdmissionState } from "./execution-admission.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
 export { feedbackService } from "./feedback.js";

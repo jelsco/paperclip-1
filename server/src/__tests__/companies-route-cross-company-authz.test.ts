@@ -44,9 +44,18 @@ const mockFeedbackService = vi.hoisted(() => ({
   listFeedbackTraces: vi.fn(),
 }));
 
+const mockExecutionAdmissionService = vi.hoisted(() => ({
+  getState: vi.fn(),
+  fence: vi.fn(),
+  reopen: vi.fn(),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 function registerCompanyRouteMocks() {
+  vi.doMock("../services/execution-admission.js", () => ({
+    executionAdmissionService: () => mockExecutionAdmissionService,
+  }));
   vi.doMock("../services/index.js", () => ({
     accessService: () => mockAccessService,
     agentService: () => mockAgentService,
@@ -175,6 +184,28 @@ function resetMockDefaults() {
   mockCompanyPortabilityService.previewExport.mockResolvedValue(exportPreviewResult());
   mockCompanyPortabilityService.previewImport.mockResolvedValue({ ok: true });
   mockCompanyPortabilityService.importBundle.mockResolvedValue(importResult());
+  mockExecutionAdmissionService.getState.mockImplementation(async (companyId: string) => ({
+    companyId,
+    fenced: false,
+    version: 0,
+    fencedAt: null,
+    reason: null,
+  }));
+  mockExecutionAdmissionService.fence.mockImplementation(async ({ companyId, reason }: { companyId: string; reason: string }) => ({
+    companyId,
+    fenced: true,
+    version: 1,
+    fencedAt: new Date("2026-07-10T00:00:00.000Z"),
+    reason,
+    token: "fence-token",
+  }));
+  mockExecutionAdmissionService.reopen.mockImplementation(async ({ companyId }: { companyId: string }) => ({
+    companyId,
+    fenced: false,
+    version: 2,
+    fencedAt: null,
+    reason: null,
+  }));
 }
 
 function assertNoTargetMutationSideEffects() {
@@ -185,6 +216,9 @@ function assertNoTargetMutationSideEffects() {
   expect(mockCompanyPortabilityService.previewExport).not.toHaveBeenCalled();
   expect(mockCompanyPortabilityService.previewImport).not.toHaveBeenCalled();
   expect(mockCompanyPortabilityService.importBundle).not.toHaveBeenCalled();
+  expect(mockExecutionAdmissionService.getState).not.toHaveBeenCalled();
+  expect(mockExecutionAdmissionService.fence).not.toHaveBeenCalled();
+  expect(mockExecutionAdmissionService.reopen).not.toHaveBeenCalled();
   expect(mockLogActivity).not.toHaveBeenCalled();
 }
 
@@ -242,6 +276,22 @@ describe.sequential("company route cross-company authorization", () => {
       request: (app: express.Express) => request(app).post(`/api/companies/${companyBId}/archive`).send({}),
     },
     {
+      label: "GET /api/companies/:companyId/execution-admission",
+      request: (app: express.Express) => request(app).get(`/api/companies/${companyBId}/execution-admission`),
+    },
+    {
+      label: "POST /api/companies/:companyId/execution-admission/fence",
+      request: (app: express.Express) => request(app)
+        .post(`/api/companies/${companyBId}/execution-admission/fence`)
+        .send({ reason: "cutover" }),
+    },
+    {
+      label: "POST /api/companies/:companyId/execution-admission/reopen",
+      request: (app: express.Express) => request(app)
+        .post(`/api/companies/${companyBId}/execution-admission/reopen`)
+        .send({ token: "fence-token", version: 1 }),
+    },
+    {
       label: "DELETE /api/companies/:companyId",
       request: (app: express.Express) => request(app).delete(`/api/companies/${companyBId}`),
     },
@@ -288,6 +338,11 @@ describe.sequential("company route cross-company authorization", () => {
     const remove = await request(app).delete(`/api/companies/${companyAId}`);
     expect(remove.status).toBe(403);
     expect(remove.body.error).toContain("Board access required");
+    await request(app).get(`/api/companies/${companyAId}/execution-admission`).expect(403);
+    await request(app)
+      .post(`/api/companies/${companyAId}/execution-admission/fence`)
+      .send({ reason: "cutover" })
+      .expect(403);
   });
 
   it("covers board actor access for non-member, viewer, active member, local trusted board, and instance admin without target membership", async () => {
@@ -320,6 +375,25 @@ describe.sequential("company route cross-company authorization", () => {
     await request(memberApp).patch(`/api/companies/${companyBId}`).send({ description: "Updated" }).expect(200);
     await request(memberApp).patch(`/api/companies/${companyBId}/branding`).send({ brandColor: "#abcdef" }).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/archive`).send({}).expect(200);
+    const admissionState = await request(memberApp)
+      .get(`/api/companies/${companyBId}/execution-admission`)
+      .expect(200);
+    expect(admissionState.headers["cache-control"]).toBe("no-store");
+    const fenceResponse = await request(memberApp)
+      .post(`/api/companies/${companyBId}/execution-admission/fence`)
+      .send({ reason: "cutover" })
+      .expect(200);
+    expect(fenceResponse.headers["cache-control"]).toBe("no-store");
+    const reopenResponse = await request(memberApp)
+      .post(`/api/companies/${companyBId}/execution-admission/reopen`)
+      .send({ token: "fence-token", version: 1 })
+      .expect(200);
+    expect(reopenResponse.headers["cache-control"]).toBe("no-store");
+    expect(mockExecutionAdmissionService.reopen).toHaveBeenCalledWith({
+      companyId: companyBId,
+      token: "fence-token",
+      version: 1,
+    });
     await request(memberApp).delete(`/api/companies/${companyBId}`).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/export`).send(exportRequest).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/exports/preview`).send(exportRequest).expect(200);

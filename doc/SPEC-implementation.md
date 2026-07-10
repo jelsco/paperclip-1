@@ -139,8 +139,13 @@ Human auth tables (`users`, `sessions`, and provider-specific auth artifacts) ar
 - `require_board_approval_for_new_agents` boolean not null default false
 - feedback sharing consent fields
 - branding fields such as `brand_color`
+- execution-admission fence fields: monotonic version, fenced timestamp, token hash, reason, and board user attribution
 
-Invariant: every business record belongs to exactly one company.
+Invariants:
+
+- every business record belongs to exactly one company
+- an active execution-admission fence has a token hash, reason, and timestamp; an open company has none of those values
+- the plaintext fence token is returned once and is never persisted
 
 ## 7.2 `agents`
 
@@ -672,6 +677,9 @@ All endpoints are under `/api` and return JSON.
 - `PATCH /companies/:companyId`
 - `PATCH /companies/:companyId/branding`
 - `POST /companies/:companyId/archive`
+- `GET /companies/:companyId/execution-admission` (board-only readback)
+- `POST /companies/:companyId/execution-admission/fence` (board-only, returns one-time token + version)
+- `POST /companies/:companyId/execution-admission/reopen` (board-only token/version CAS)
 
 ## 10.2 Goals
 
@@ -885,6 +893,9 @@ Scheduler must skip invocation when:
 - agent is paused/terminated
 - an existing run is active
 - hard budget limit has been hit
+- the company execution-admission fence is active
+
+The execution-admission fence blocks or durably records a skipped request for every new wake producer, including manual/on-demand wakes, assignments, routines, recovery, watchdogs, and continuations. It also blocks agent create/resume/activation paths. Runs and queued requests admitted before the fence remain eligible to reach terminal state. Reopening requires the one-time token and exact fence version; every fence/reopen mutation is audited.
 
 ## 12. Governance and Approval Flows
 

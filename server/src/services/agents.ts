@@ -30,6 +30,7 @@ import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
+import { executionAdmissionService } from "./execution-admission.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -223,6 +224,7 @@ export function deduplicateAgentName(
 
 export function agentService(db: Db) {
   const secretsSvc = secretService(db);
+  const executionAdmission = executionAdmissionService(db);
 
   function currentUtcMonthWindow(now = new Date()) {
     const year = now.getUTCFullYear();
@@ -409,6 +411,13 @@ export function agentService(db: Db) {
     ) {
       throw conflict("Pending approval agents cannot be activated directly");
     }
+    if (
+      data.status &&
+      data.status !== existing.status &&
+      (data.status === "idle" || data.status === "running" || data.status === "active")
+    ) {
+      await executionAdmission.assertOpen(existing.companyId);
+    }
 
     if (data.reportsTo !== undefined) {
       if (data.reportsTo) {
@@ -502,6 +511,7 @@ export function agentService(db: Db) {
     getById,
 
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+      await executionAdmission.assertOpen(companyId);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -573,6 +583,7 @@ export function agentService(db: Db) {
       if (existing.status === "pending_approval") {
         throw conflict("Pending approval agents cannot be resumed");
       }
+      await executionAdmission.assertOpen(existing.companyId);
 
       const updated = await db
         .update(agents)
@@ -599,6 +610,7 @@ export function agentService(db: Db) {
       if (existing.status !== "error") {
         throw conflict("Only agents in error status can have their error cleared");
       }
+      await executionAdmission.assertOpen(existing.companyId);
 
       const updated = await db
         .update(agents)
@@ -676,6 +688,9 @@ export function agentService(db: Db) {
     },
 
     activatePendingApproval: async (id: string) => {
+      const existing = await getById(id);
+      if (!existing) return null;
+      await executionAdmission.assertOpen(existing.companyId);
       const activatedAgent = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const updated = await tx
@@ -697,8 +712,8 @@ export function agentService(db: Db) {
         return { agent: activatedAgent, activated: true };
       }
 
-      const existing = await getById(id);
-      return existing ? { agent: existing, activated: false } : null;
+      const current = await getById(id);
+      return current ? { agent: current, activated: false } : null;
     },
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {

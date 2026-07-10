@@ -67,6 +67,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { executionAdmissionService } from "./execution-admission.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
@@ -598,6 +599,7 @@ export function routineService(
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
   });
+  const executionAdmission = executionAdmissionService(db);
 
   async function getRoutineById(id: string) {
     return db
@@ -1154,14 +1156,18 @@ export function routineService(
     }
   }
 
-  // Records a skipped scheduled firing without creating an execution issue. Used when the
-  // routine's project is paused: the tick is still claimed/advanced upstream (no backfill),
-  // and run history + trigger audit reflect the pause-specific skip.
-  async function recordSuppressedScheduleRun(input: {
+  // Records a suppressed firing without creating an execution issue. Schedule
+  // suppression still advances the claimed tick upstream, so reopening never
+  // backfills work that was deliberately fenced or paused.
+  async function recordSuppressedRoutineRun(input: {
     routine: typeof routines.$inferSelect;
-    trigger: typeof routineTriggers.$inferSelect;
+    trigger: typeof routineTriggers.$inferSelect | null;
+    source: "schedule" | "manual" | "api" | "webhook";
     reason: string;
-    nextRunAt: Date | null;
+    resultStatus: string;
+    nextRunAt?: Date | null;
+    idempotencyKey?: string | null;
+    triggerPayload?: Record<string, unknown> | null;
   }) {
     const triggeredAt = new Date();
     const run = await db.transaction(async (tx) => {
@@ -1171,11 +1177,13 @@ export function routineService(
         .values({
           companyId: input.routine.companyId,
           routineId: input.routine.id,
-          triggerId: input.trigger.id,
-          source: "schedule",
+          triggerId: input.trigger?.id ?? null,
+          source: input.source,
           status: "skipped",
           triggeredAt,
           failureReason: input.reason,
+          idempotencyKey: input.idempotencyKey ?? null,
+          triggerPayload: input.triggerPayload ?? null,
           completedAt: triggeredAt,
           linkedIssueId: null,
           routineRevisionId: input.routine.latestRevisionId,
@@ -1184,9 +1192,9 @@ export function routineService(
         .returning();
       await updateRoutineTouchedState({
         routineId: input.routine.id,
-        triggerId: input.trigger.id,
+        triggerId: input.trigger?.id ?? null,
         triggeredAt,
-        status: "skipped_paused",
+        status: input.resultStatus,
         nextRunAt: input.nextRunAt,
       }, txDb);
       return createdRun;
@@ -1196,14 +1204,14 @@ export function routineService(
       await logActivity(db, {
         companyId: input.routine.companyId,
         actorType: "system",
-        actorId: "routine-scheduler",
+        actorId: input.source === "schedule" ? "routine-scheduler" : "routine-admission",
         action: "routine.run_skipped",
         entityType: "routine_run",
         entityId: run.id,
         details: {
           routineId: input.routine.id,
-          triggerId: input.trigger.id,
-          source: "schedule",
+          triggerId: input.trigger?.id ?? null,
+          source: input.source,
           status: "skipped",
           reason: input.reason,
         },
@@ -1444,6 +1452,18 @@ export function routineService(
     descriptionAppendix?: string | null;
     actor?: Actor;
   }) {
+    const admissionState = await executionAdmission.getState(input.routine.companyId);
+    if (admissionState.fenced) {
+      return recordSuppressedRoutineRun({
+        routine: input.routine,
+        trigger: input.trigger,
+        source: input.source,
+        reason: "company.execution_admission_fenced",
+        resultStatus: "skipped_fenced",
+        idempotencyKey: input.idempotencyKey,
+        triggerPayload: input.payload,
+      });
+    }
     const projectId = input.projectId ?? input.routine.projectId ?? null;
     const projectWorkspaceId = input.projectWorkspaceId ?? null;
     const assigneeAgentId = input.assigneeAgentId ?? input.routine.assigneeAgentId ?? null;
@@ -2792,10 +2812,12 @@ export function routineService(
         if (!claimed) continue;
 
         if (projectPaused) {
-          await recordSuppressedScheduleRun({
+          await recordSuppressedRoutineRun({
             routine: row.routine,
             trigger: row.trigger,
+            source: "schedule",
             reason: "paused",
+            resultStatus: "skipped_paused",
             nextRunAt: claimedNextRunAt,
           });
           continue;

@@ -146,6 +146,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { executionAdmissionService } from "./execution-admission.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -4826,6 +4827,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+  const executionAdmission = executionAdmissionService(db);
   const recovery = recoveryService(db, { enqueueWakeup });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
@@ -13083,6 +13085,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await writeSkippedRequest("company.inactive", {
         error: `Wake suppressed because company status is ${companyStatus}`,
       });
+      return null;
+    }
+
+    const admissionState = await executionAdmission.getState(agent.companyId);
+    if (admissionState.fenced) {
+      await writeSkippedRequest("company.execution_admission_fenced", {
+        error: "Wake suppressed because company execution admission is fenced",
+      });
+      if (opts.requestedByActorType === "user") {
+        throw conflict("Company execution admission is fenced", {
+          code: "company_execution_admission_fenced",
+          version: admissionState.version,
+        });
+      }
       return null;
     }
 
