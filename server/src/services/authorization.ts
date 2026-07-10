@@ -21,6 +21,18 @@ import {
 } from "./trust-preset-resolver.js";
 import { logger } from "../middleware/logger.js";
 
+// "board"/"local-board" are non-human board-authority sentinels, not real users:
+// they have no `user` row and no company membership. They are legitimately stamped
+// as `responsible_user_id` on board-authored issues/routines and on recovery wakes
+// (e.g. `actor.userId ?? "board"`). The responsible-user intersection exists to CAP
+// an agent to a specific human's permissions; a board sentinel is the top-level
+// board/founder authority, so it must never be resolved as a human user. Treating it
+// as a missing user (RESPONSIBLE_USER_UNAVAILABLE) denies every issue operation the
+// run performs — including the recovery actions meant to unblock its own issue — which
+// deadlocks board-responsible runs (RR issue #7941). Board authority never reduces an
+// agent's own grant, so these bypass the intersection entirely.
+const BOARD_RESPONSIBLE_USER_SENTINELS: ReadonlySet<string> = new Set(["board", "local-board"]);
+
 export type AuthorizationActor =
   {
     type: "board" | "agent" | "none";
@@ -1652,6 +1664,14 @@ export function authorizationService(db: Db) {
   ): Promise<AuthorizationDecision> {
     const responsibleUserId = input.actor.onBehalfOfUserId?.trim();
     if (input.actor.type !== "agent" || !responsibleUserId || !agentDecision.allowed) {
+      return agentDecision;
+    }
+
+    // A board-authority sentinel is not a constrainable human user, so there is no
+    // human permission set to intersect with. Skip the intersection (the agent's own
+    // grant governs) rather than denying it as an unavailable user — see the sentinel
+    // constant above and RR issue #7941.
+    if (BOARD_RESPONSIBLE_USER_SENTINELS.has(responsibleUserId)) {
       return agentDecision;
     }
 

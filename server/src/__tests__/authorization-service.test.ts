@@ -436,6 +436,40 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
+  it("treats a board responsible-user sentinel as board authority, not an unavailable user", async () => {
+    // RR #7941: board-authored issues/routines and recovery wakes stamp the run's
+    // responsible_user_id with the non-human "board" sentinel. It has no user row or
+    // membership, so the human-permission intersection must be skipped — otherwise the
+    // agent is denied RESPONSIBLE_USER_UNAVAILABLE on its own assigned issue and can
+    // never run the recovery that unblocks it.
+    const company = await createCompany(db, "BoardResponsibleSentinel");
+    const actorAgent = await createAgent(db, company.id, { role: "engineer" });
+    const issue = await createIssue(db, company.id, {
+      title: "Board-responsible assigned issue",
+      assigneeAgentId: actorAgent.id,
+    });
+
+    const decision = await authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: actorAgent.id,
+        companyId: company.id,
+        onBehalfOfUserId: "board",
+        source: "agent_jwt",
+      },
+      action: "issue:mutate",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: issue.id,
+        assigneeAgentId: actorAgent.id,
+      },
+    });
+
+    expect(decision).toMatchObject({ allowed: true, reason: "allow_self" });
+    expect(decision.code).toBeUndefined();
+  });
+
   it("allows delegated protected assignment when both agent and responsible user are authorized", async () => {
     const company = await createCompany(db, "ResponsibleUserAllowed");
     const actorAgent = await createAgent(db, company.id, { role: "engineer" });
