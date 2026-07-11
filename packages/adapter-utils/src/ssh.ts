@@ -226,7 +226,13 @@ function buildSupervisedSshRemoteCommand(
       `__paperclip_run_dir=${shellQuote(remoteRunDir)}`,
       'rm -rf "$__paperclip_run_dir"',
       'mkdir -p "$__paperclip_run_dir"',
-      `PAPERCLIP_SSH_RUN_ID=${shellQuote(remoteRunId)} PAPERCLIP_SSH_RUN_DIR=${shellQuote(remoteRunDir)} setsid sh -c ${shellQuote(remoteCommand)} &`,
+      // #8236: preserve the remaining piped stdin (the env frame is already consumed above) for the
+      // backgrounded supervised command. A POSIX async list ("&") otherwise takes stdin from /dev/null,
+      // silently starving every stdin-consuming step of an os_identity run (callback-bridge base64 upload,
+      // agent prompt input) -> "callback bridge entrypoint upload sha mismatch". Save real stdin to fd 9,
+      // redirect the child from it, and close fd 9 in the child so the agent never inherits the descriptor.
+      "exec 9<&0",
+      `PAPERCLIP_SSH_RUN_ID=${shellQuote(remoteRunId)} PAPERCLIP_SSH_RUN_DIR=${shellQuote(remoteRunDir)} setsid sh -c ${shellQuote(remoteCommand)} <&9 9<&- &`,
       "__paperclip_pid=$!",
       'printf "%s\\n" "$__paperclip_pid" > "$__paperclip_run_dir/pid"',
       'wait "$__paperclip_pid"',
