@@ -30,6 +30,16 @@ import {
 } from "./json-schema-secret-refs.js";
 import { resolveActiveEnvironmentCustomImageTemplateForRuntime } from "./environment-custom-image-runtime.js";
 
+export function isOsIdentitySshEnvironment(
+  environment: { driver: string; config: unknown } | null | undefined,
+): boolean {
+  const config =
+    environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
+      ? (environment.config as Record<string, unknown>)
+      : null;
+  return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
+}
+
 const secretRefSchema = z.object({
   type: z.literal("secret_ref"),
   secretId: z.string().uuid(),

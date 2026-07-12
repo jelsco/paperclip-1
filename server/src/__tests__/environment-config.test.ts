@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../errors.js";
-import { normalizeEnvironmentConfig, parseEnvironmentDriverConfig } from "../services/environment-config.ts";
+import { isOsIdentitySshEnvironment, normalizeEnvironmentConfig, parseEnvironmentDriverConfig } from "../services/environment-config.ts";
 
 describe("environment config helpers", () => {
   it("normalizes SSH config into its canonical stored shape", () => {
@@ -298,5 +298,31 @@ describe("environment config helpers", () => {
         template: "base",
       },
     });
+  });
+});
+
+
+describe("isOsIdentitySshEnvironment", () => {
+  it("returns true for an ssh environment with os_identity isolation", () => {
+    expect(
+      isOsIdentitySshEnvironment({ driver: "ssh", config: { isolationMode: "os_identity" } }),
+    ).toBe(true);
+  });
+
+  it("returns false for an ssh environment without os_identity isolation", () => {
+    expect(isOsIdentitySshEnvironment({ driver: "ssh", config: { host: "127.0.0.1" } })).toBe(false);
+  });
+
+  it("returns false for a non-ssh driver even with an os_identity config", () => {
+    expect(
+      isOsIdentitySshEnvironment({ driver: "local", config: { isolationMode: "os_identity" } }),
+    ).toBe(false);
+  });
+
+  it("returns false for null, undefined, or non-object config", () => {
+    expect(isOsIdentitySshEnvironment(null)).toBe(false);
+    expect(isOsIdentitySshEnvironment(undefined)).toBe(false);
+    expect(isOsIdentitySshEnvironment({ driver: "ssh", config: null })).toBe(false);
+    expect(isOsIdentitySshEnvironment({ driver: "ssh", config: ["os_identity"] })).toBe(false);
   });
 });

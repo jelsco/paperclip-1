@@ -205,6 +205,7 @@ import {
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
+import { isOsIdentitySshEnvironment } from "./environment-config.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -9949,6 +9950,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const runtime = await ensureRuntimeState(agent);
+    // os_identity agents run only in their sanitized non-Git workspace; never hand them a
+    // Git-backed harness checkout / execution workspace (the SSH sync guard rejects it). #8281
+    const runEnvironment = agent.defaultEnvironmentId
+      ? await environmentsSvc.getById(agent.defaultEnvironmentId)
+      : null;
+    const isOsIdentityRun = isOsIdentitySshEnvironment(runEnvironment);
     const context = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
@@ -9960,6 +9967,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (
       issueId &&
       issueContext &&
+      !isOsIdentityRun &&
       shouldAutoCheckoutIssueForWake({
         contextSnapshot: context,
         issueStatus: issueContext.status,
@@ -10136,8 +10144,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueSettings: issueExecutionWorkspaceSettings,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
     });
-    const requestedExecutionWorkspaceMode =
-      trustPreset.kind === "low_trust_review" && resolvedExecutionWorkspaceMode === "shared_workspace"
+    const requestedExecutionWorkspaceMode = isOsIdentityRun
+      ? "agent_default"
+      : trustPreset.kind === "low_trust_review" && resolvedExecutionWorkspaceMode === "shared_workspace"
         ? "isolated_workspace"
         : resolvedExecutionWorkspaceMode;
     const issueRef = issueContext
@@ -10151,7 +10160,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           description: issueContext.description,
           projectId: issueContext.projectId,
           projectWorkspaceId: issueContext.projectWorkspaceId,
-          executionWorkspaceId: issueContext.executionWorkspaceId,
+          executionWorkspaceId: isOsIdentityRun ? null : issueContext.executionWorkspaceId,
           executionWorkspacePreference: issueContext.executionWorkspacePreference,
         }
       : null;

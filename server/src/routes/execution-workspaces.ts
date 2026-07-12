@@ -32,6 +32,7 @@ import {
 import { assertCanManageExecutionWorkspaceRuntimeServices } from "./workspace-runtime-service-authz.js";
 import { appendWithCap } from "../adapters/utils.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
+import { isOsIdentitySshEnvironment } from "../services/environment-config.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { forbidden } from "../errors.js";
 
@@ -45,13 +46,6 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
-
-  function isOsIdentitySshEnvironment(environment: { driver: string; config: unknown } | null | undefined): boolean {
-    const config = environment?.config && typeof environment.config === "object" && !Array.isArray(environment.config)
-      ? environment.config as Record<string, unknown>
-      : null;
-    return environment?.driver === "ssh" && config?.isolationMode === "os_identity";
-  }
 
   function executionWorkspacePatchTouchesBoundarySelectors(body: Record<string, unknown>): string[] {
     return [
