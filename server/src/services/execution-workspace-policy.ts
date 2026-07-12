@@ -212,6 +212,24 @@ export function resolveExecutionWorkspaceMode(input: {
   return "shared_workspace";
 }
 
+export function applyOsIdentityWorkspaceContainment(input: {
+  isOsIdentityRun: boolean;
+  requestedMode: ParsedExecutionWorkspaceMode;
+  issueExecutionWorkspaceId: string | null;
+}): { mode: ParsedExecutionWorkspaceMode; issueExecutionWorkspaceId: string | null } {
+  // os_identity SSH agents run only in their sanitized non-Git workspace: force the
+  // adapter-managed (agent_default) workspace and drop any git-backed execution workspace so
+  // the SSH whole-repository sync guard is never hit. Non-os_identity runs pass through
+  // unchanged. #8281
+  if (input.isOsIdentityRun) {
+    return { mode: "agent_default", issueExecutionWorkspaceId: null };
+  }
+  return {
+    mode: input.requestedMode,
+    issueExecutionWorkspaceId: input.issueExecutionWorkspaceId,
+  };
+}
+
 export function buildExecutionWorkspaceAdapterConfig(input: {
   agentConfig: Record<string, unknown>;
   projectPolicy: ProjectExecutionWorkspacePolicy | null;

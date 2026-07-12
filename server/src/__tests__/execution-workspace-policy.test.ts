@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyOsIdentityWorkspaceContainment,
   buildExecutionWorkspaceAdapterConfig,
   defaultIssueExecutionWorkspaceSettingsForProject,
   gateProjectExecutionWorkspacePolicy,
@@ -260,5 +261,37 @@ describe("execution workspace policy helpers", () => {
         true,
       ),
     ).toEqual({ enabled: true, defaultMode: "isolated_workspace" });
+  });
+});
+
+describe("#8281 applyOsIdentityWorkspaceContainment", () => {
+  it("forces the adapter-managed workspace and drops the execution workspace for an os_identity run", () => {
+    expect(
+      applyOsIdentityWorkspaceContainment({
+        isOsIdentityRun: true,
+        requestedMode: "isolated_workspace",
+        issueExecutionWorkspaceId: "ews-123",
+      }),
+    ).toEqual({ mode: "agent_default", issueExecutionWorkspaceId: null });
+  });
+
+  it("contains an os_identity run even when no execution workspace was requested", () => {
+    expect(
+      applyOsIdentityWorkspaceContainment({
+        isOsIdentityRun: true,
+        requestedMode: "shared_workspace",
+        issueExecutionWorkspaceId: null,
+      }),
+    ).toEqual({ mode: "agent_default", issueExecutionWorkspaceId: null });
+  });
+
+  it("passes a non-os_identity run through unchanged", () => {
+    expect(
+      applyOsIdentityWorkspaceContainment({
+        isOsIdentityRun: false,
+        requestedMode: "isolated_workspace",
+        issueExecutionWorkspaceId: "ews-123",
+      }),
+    ).toEqual({ mode: "isolated_workspace", issueExecutionWorkspaceId: "ews-123" });
   });
 });

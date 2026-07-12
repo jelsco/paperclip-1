@@ -137,6 +137,7 @@ import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./exec
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
 import {
+  applyOsIdentityWorkspaceContainment,
   buildExecutionWorkspaceAdapterConfig,
   gateProjectExecutionWorkspacePolicy,
   issueExecutionWorkspaceModeForPersistedWorkspace,
@@ -3640,13 +3641,18 @@ export function resolveTaskSessionConfigFreshness(input: {
   };
 }
 
-function shouldAutoCheckoutIssueForWake(input: {
+export function shouldAutoCheckoutIssueForWake(input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
   isDependencyReady: boolean;
   agentId: string;
+  isOsIdentityRun: boolean;
 }) {
+  // os_identity SSH agents run only in their sanitized non-Git workspace; never
+  // auto-check-out the repository into a git worktree for them (the SSH sync guard
+  // rejects it). #8281
+  if (input.isOsIdentityRun) return false;
   if (input.issueAssigneeAgentId !== input.agentId) return false;
   if (!input.isDependencyReady) return false;
 
@@ -9967,13 +9973,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (
       issueId &&
       issueContext &&
-      !isOsIdentityRun &&
       shouldAutoCheckoutIssueForWake({
         contextSnapshot: context,
         issueStatus: issueContext.status,
         issueAssigneeAgentId: issueContext.assigneeAgentId,
         isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
         agentId: agent.id,
+        isOsIdentityRun,
       })
     ) {
       try {
@@ -10144,11 +10150,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueSettings: issueExecutionWorkspaceSettings,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
     });
-    const requestedExecutionWorkspaceMode = isOsIdentityRun
-      ? "agent_default"
-      : trustPreset.kind === "low_trust_review" && resolvedExecutionWorkspaceMode === "shared_workspace"
+    const baseExecutionWorkspaceMode =
+      trustPreset.kind === "low_trust_review" && resolvedExecutionWorkspaceMode === "shared_workspace"
         ? "isolated_workspace"
         : resolvedExecutionWorkspaceMode;
+    // os_identity SSH agents are contained to their non-Git adapter-managed workspace and
+    // never receive a git-backed execution workspace. #8281
+    const osIdentityWorkspaceContainment = applyOsIdentityWorkspaceContainment({
+      isOsIdentityRun,
+      requestedMode: baseExecutionWorkspaceMode,
+      issueExecutionWorkspaceId: issueContext?.executionWorkspaceId ?? null,
+    });
+    const requestedExecutionWorkspaceMode = osIdentityWorkspaceContainment.mode;
     const issueRef = issueContext
       ? {
           id: issueContext.id,
@@ -10160,7 +10173,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           description: issueContext.description,
           projectId: issueContext.projectId,
           projectWorkspaceId: issueContext.projectWorkspaceId,
-          executionWorkspaceId: isOsIdentityRun ? null : issueContext.executionWorkspaceId,
+          executionWorkspaceId: osIdentityWorkspaceContainment.issueExecutionWorkspaceId,
           executionWorkspacePreference: issueContext.executionWorkspacePreference,
         }
       : null;

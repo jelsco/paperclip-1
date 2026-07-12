@@ -32,6 +32,7 @@ import {
   requiresPushCapabilityPreflight,
   resolveWorkspaceAfterLowTrustPreflight,
   resolveRuntimeSessionParamsForWorkspace,
+  shouldAutoCheckoutIssueForWake,
   shouldDeferFollowupWakeForSameIssue,
   stripHostWorkspaceProvisionForLowTrustSandbox,
   stripWorkspaceRuntimeFromExecutionRunConfig,
@@ -2406,5 +2407,37 @@ describe("parseSessionCompactionPolicy", () => {
       maxRawInputTokens: 500_000,
       maxSessionAgeHours: 0,
     });
+  });
+});
+
+describe("#8281 shouldAutoCheckoutIssueForWake os_identity gate", () => {
+  const eligibleForCheckout = {
+    contextSnapshot: { wakeReason: "issue_commented" },
+    issueStatus: "in_progress",
+    issueAssigneeAgentId: "agent-1",
+    isDependencyReady: true,
+    agentId: "agent-1",
+  };
+
+  it("auto-checks-out an eligible issue for a normal (non-os_identity) run", () => {
+    expect(shouldAutoCheckoutIssueForWake({ ...eligibleForCheckout, isOsIdentityRun: false })).toBe(
+      true,
+    );
+  });
+
+  it("never auto-checks-out for an os_identity run, even when otherwise eligible", () => {
+    expect(shouldAutoCheckoutIssueForWake({ ...eligibleForCheckout, isOsIdentityRun: true })).toBe(
+      false,
+    );
+  });
+
+  it("still rejects an ineligible issue for a non-os_identity run (assignee mismatch)", () => {
+    expect(
+      shouldAutoCheckoutIssueForWake({
+        ...eligibleForCheckout,
+        issueAssigneeAgentId: "other-agent",
+        isOsIdentityRun: false,
+      }),
+    ).toBe(false);
   });
 });
