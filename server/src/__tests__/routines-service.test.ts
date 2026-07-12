@@ -15,8 +15,10 @@ import {
   heartbeatRuns,
   instanceSettings,
   issueInboxArchives,
+  issueLabels,
   issueReadStates,
   issues,
+  labels,
   projectWorkspaces,
   projects,
   routineDocuments,
@@ -32,12 +34,44 @@ import {
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
-import { routineService } from "../services/routines.ts";
+import { createRoutineDispatchFingerprint, createRoutineEnvFingerprint, routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
+import {
+  OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV,
+} from "../services/outreach-routine-governance.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const originalSecretsProviderEnv = process.env.PAPERCLIP_SECRETS_PROVIDER;
+const originalOutreachGovernanceEnv = process.env[OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV];
+
+const RR_OUTREACH_GOVERNANCE_CONFIG = {
+  companyId: "0fabe377-3008-4cde-96ad-b1ae5eb5e469",
+  operationsProjectId: "8e99b255-02f1-401d-ab06-93cc8dc15552",
+  outreachProjectId: "202c77b2-e2d0-4030-a416-e41fcf246a3e",
+  automateLabelId: "519fc58e-0411-4b5d-bdeb-02fb637e4f8f",
+  outreachLabelId: "7f4ac6f1-6e9e-472d-a751-899b6a0c16d1",
+  contentLabelId: "6c443851-fe4f-44e9-b11f-a4e2b9a4cbcd",
+  ceoAgentId: "ce56f1d2-941d-42b1-a54b-fc99897d6e9e",
+  outreachManagerAgentId: "c100bafe-c428-4e55-be99-0ec4ebaa32a0",
+  outreachDirectReportAgentIds: [
+    "e7651b93-a8ca-4c74-8ac0-2003678abb77",
+    "431f481e-ee9a-4bac-a38a-8076db805f09",
+    "a4a8d13b-3f28-49fb-b16e-78e5ba5a57f3",
+    "6962d181-7524-4a9b-a1a2-de5e7de1f7f1",
+    "e27b046d-6518-492c-99d6-d10ad8cdea63",
+    "7fd12a67-5597-4eba-ae75-e4c2aea9cb7c",
+  ],
+};
+
+const RR_COMPANY_ID = RR_OUTREACH_GOVERNANCE_CONFIG.companyId;
+const RR_OPERATIONS_PROJECT_ID = RR_OUTREACH_GOVERNANCE_CONFIG.operationsProjectId;
+const RR_OUTREACH_GO_LIVE_PROJECT_ID = RR_OUTREACH_GOVERNANCE_CONFIG.outreachProjectId;
+const RR_AUTOMATE_LABEL_ID = RR_OUTREACH_GOVERNANCE_CONFIG.automateLabelId;
+const RR_OUTREACH_LABEL_ID = RR_OUTREACH_GOVERNANCE_CONFIG.outreachLabelId;
+const RR_CONTENT_LABEL_ID = RR_OUTREACH_GOVERNANCE_CONFIG.contentLabelId;
+const RR_CEO_AGENT_ID = RR_OUTREACH_GOVERNANCE_CONFIG.ceoAgentId;
+const RR_OUTREACH_MANAGER_AGENT_ID = RR_OUTREACH_GOVERNANCE_CONFIG.outreachManagerAgentId;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -60,7 +94,13 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     } else {
       process.env.PAPERCLIP_SECRETS_PROVIDER = originalSecretsProviderEnv;
     }
+    if (originalOutreachGovernanceEnv === undefined) {
+      delete process.env[OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV];
+    } else {
+      process.env[OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV] = originalOutreachGovernanceEnv;
+    }
     await db.delete(activityLog);
+    await db.delete(issueLabels);
     await db.delete(issueInboxArchives);
     await db.delete(issueReadStates);
     await db.delete(secretAccessEvents);
@@ -78,6 +118,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
+    await db.delete(labels);
     await db.delete(agents);
     await db.delete(companies);
     await db.delete(instanceSettings);
@@ -1016,6 +1057,247 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       includeRoutineExecutions: true,
     });
     expect(inboxIssues.map((issue) => issue.id)).toContain(previousIssue.id);
+  });
+
+  it("bootstraps governance fields on non-exempt RR Outreach routine execution issues", async () => {
+    process.env[OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV] = JSON.stringify(RR_OUTREACH_GOVERNANCE_CONFIG);
+    const companyId = RR_COMPANY_ID;
+    const issuePrefix = "RR";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "ReplenishRadar",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: RR_OUTREACH_MANAGER_AGENT_ID,
+        companyId,
+        name: "Riley - Outreach Manager",
+        role: "manager",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: RR_CEO_AGENT_ID,
+        companyId,
+        name: "CEO",
+        role: "ceo",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(projects).values([
+      { id: RR_OPERATIONS_PROJECT_ID, companyId, name: "Operations", status: "in_progress" },
+      { id: RR_OUTREACH_GO_LIVE_PROJECT_ID, companyId, name: "Outreach Go-Live", status: "in_progress" },
+    ]);
+    await db.insert(labels).values([
+      { id: RR_AUTOMATE_LABEL_ID, companyId, name: "automate", color: "#64748b" },
+      { id: RR_OUTREACH_LABEL_ID, companyId, name: "outreach", color: "#0f766e" },
+      { id: RR_CONTENT_LABEL_ID, companyId, name: "content", color: "#7c3aed" },
+    ]);
+
+    const wakeups: string[] = [];
+    const svc = routineService(db, {
+      heartbeat: {
+        wakeup: async (_agentId, wakeupOpts) => {
+          const issueId =
+            (typeof wakeupOpts.payload?.issueId === "string" && wakeupOpts.payload.issueId) ||
+            (typeof wakeupOpts.contextSnapshot?.issueId === "string" && wakeupOpts.contextSnapshot.issueId) ||
+            null;
+          if (issueId) wakeups.push(issueId);
+          return null;
+        },
+      },
+    });
+
+    const routine = await svc.create(companyId, {
+      projectId: RR_OPERATIONS_PROJECT_ID,
+      goalId: null,
+      parentIssueId: null,
+      title: "ICP Prospecting",
+      description: "Build the endless affiliate prospect list.",
+      assigneeAgentId: RR_OUTREACH_MANAGER_AGENT_ID,
+      priority: "medium",
+      status: "active",
+      concurrencyPolicy: "coalesce_if_active",
+      catchUpPolicy: "skip_missed",
+    }, {});
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    expect(run.status).toBe("issue_created");
+    expect(wakeups).toEqual([run.linkedIssueId]);
+
+    const [created] = await db.select().from(issues).where(eq(issues.id, run.linkedIssueId!));
+    expect(created?.projectId).toBe(RR_OUTREACH_GO_LIVE_PROJECT_ID);
+    expect(created?.executionPolicy).toMatchObject({
+      mode: "normal",
+      commentRequired: true,
+      stages: [
+        {
+          type: "review",
+          approvalsNeeded: 1,
+          participants: [{ type: "agent", agentId: RR_CEO_AGENT_ID }],
+        },
+      ],
+    });
+
+    const linkedLabels = await db
+      .select({ labelId: issueLabels.labelId })
+      .from(issueLabels)
+      .where(eq(issueLabels.issueId, run.linkedIssueId!));
+    expect(linkedLabels.map((row) => row.labelId).sort()).toEqual([RR_OUTREACH_LABEL_ID].sort());
+  });
+
+  it("coalesces RR Outreach routine dispatches with pre-governance project fingerprints", async () => {
+    process.env[OUTREACH_ROUTINE_GOVERNANCE_CONFIG_ENV] = JSON.stringify(RR_OUTREACH_GOVERNANCE_CONFIG);
+    const companyId = RR_COMPANY_ID;
+    const issuePrefix = "RR";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "ReplenishRadar",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: RR_OUTREACH_MANAGER_AGENT_ID,
+        companyId,
+        name: "Riley - Outreach Manager",
+        role: "manager",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: RR_CEO_AGENT_ID,
+        companyId,
+        name: "CEO",
+        role: "ceo",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(projects).values([
+      { id: RR_OPERATIONS_PROJECT_ID, companyId, name: "Operations", status: "in_progress" },
+      { id: RR_OUTREACH_GO_LIVE_PROJECT_ID, companyId, name: "Outreach Go-Live", status: "in_progress" },
+    ]);
+    await db.insert(labels).values([
+      { id: RR_AUTOMATE_LABEL_ID, companyId, name: "automate", color: "#64748b" },
+      { id: RR_OUTREACH_LABEL_ID, companyId, name: "outreach", color: "#0f766e" },
+    ]);
+
+    const svc = routineService(db, {
+      heartbeat: {
+        wakeup: async () => null,
+      },
+    });
+    const issueSvc = issueService(db);
+    const routine = await svc.create(companyId, {
+      projectId: RR_OPERATIONS_PROJECT_ID,
+      goalId: null,
+      parentIssueId: null,
+      title: "ICP Prospecting",
+      description: "Build the endless affiliate prospect list.",
+      assigneeAgentId: RR_OUTREACH_MANAGER_AGENT_ID,
+      priority: "medium",
+      status: "active",
+      concurrencyPolicy: "coalesce_if_active",
+      catchUpPolicy: "skip_missed",
+    }, {});
+    const legacyFingerprint = createRoutineDispatchFingerprint({
+      payload: null,
+      projectId: RR_OPERATIONS_PROJECT_ID,
+      projectWorkspaceId: null,
+      assigneeAgentId: RR_OUTREACH_MANAGER_AGENT_ID,
+      routineRevisionId: routine.latestRevisionId,
+      routineEnvFingerprint: createRoutineEnvFingerprint(routine.env),
+      executionWorkspaceId: null,
+      executionWorkspacePreference: null,
+      executionWorkspaceSettings: null,
+      title: routine.title,
+      description: routine.description,
+    });
+    const governedFingerprint = createRoutineDispatchFingerprint({
+      payload: null,
+      projectId: RR_OUTREACH_GO_LIVE_PROJECT_ID,
+      projectWorkspaceId: null,
+      assigneeAgentId: RR_OUTREACH_MANAGER_AGENT_ID,
+      routineRevisionId: routine.latestRevisionId,
+      routineEnvFingerprint: createRoutineEnvFingerprint(routine.env),
+      executionWorkspaceId: null,
+      executionWorkspacePreference: null,
+      executionWorkspaceSettings: null,
+      title: routine.title,
+      description: routine.description,
+    });
+    expect(legacyFingerprint).not.toBe(governedFingerprint);
+
+    const previousRunId = randomUUID();
+    const liveHeartbeatRunId = randomUUID();
+    const previousIssue = await issueSvc.create(companyId, {
+      projectId: RR_OUTREACH_GO_LIVE_PROJECT_ID,
+      title: routine.title,
+      description: routine.description,
+      status: "in_progress",
+      priority: routine.priority,
+      assigneeAgentId: routine.assigneeAgentId,
+      originKind: "routine_execution",
+      originId: routine.id,
+      originRunId: previousRunId,
+      originFingerprint: legacyFingerprint,
+    });
+    await db.insert(routineRuns).values({
+      id: previousRunId,
+      companyId,
+      routineId: routine.id,
+      triggerId: null,
+      source: "manual",
+      status: "issue_created",
+      triggeredAt: new Date("2026-07-03T12:00:00.000Z"),
+      linkedIssueId: previousIssue.id,
+      dispatchFingerprint: legacyFingerprint,
+      routineRevisionId: routine.latestRevisionId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: liveHeartbeatRunId,
+      companyId,
+      agentId: RR_OUTREACH_MANAGER_AGENT_ID,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: { issueId: previousIssue.id },
+      startedAt: new Date("2026-07-03T12:01:00.000Z"),
+    });
+    await db
+      .update(issues)
+      .set({
+        checkoutRunId: liveHeartbeatRunId,
+        executionRunId: liveHeartbeatRunId,
+        executionLockedAt: new Date("2026-07-03T12:01:00.000Z"),
+      })
+      .where(eq(issues.id, previousIssue.id));
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("coalesced");
+    expect(run.dispatchFingerprint).toBe(legacyFingerprint);
+    expect(run.linkedIssueId).toBe(previousIssue.id);
+    expect(run.coalescedIntoRunId).toBe(previousRunId);
+    await expect(db.select().from(issues).where(eq(issues.originId, routine.id))).resolves.toHaveLength(1);
   });
 
   it("does not coalesce live routine runs with different resolved variables", async () => {
