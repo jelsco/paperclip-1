@@ -6,6 +6,11 @@ import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompanyPortabilityFileEntry } from "@paperclipai/shared";
 
+const isolationGuard = vi.hoisted(() => ({
+  required: false,
+  isolatedWorkspacesEnabled: false,
+}));
+
 const companySvc = {
   getById: vi.fn(),
   create: vi.fn(),
@@ -76,6 +81,17 @@ const agentInstructionsSvc = {
   materializeManagedBundle: vi.fn(),
 };
 
+vi.mock("../services/company-project-isolation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/company-project-isolation.js")>();
+  return {
+    ...actual,
+    withCompanyProjectIsolationLock: vi.fn(async (_db, _companyId, operation) => operation(
+      {} as never,
+      isolationGuard,
+    )),
+  };
+});
+
 vi.mock("../services/companies.js", () => ({
   companyService: () => companySvc,
 }));
@@ -133,6 +149,8 @@ describe("company portability", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isolationGuard.required = false;
+    isolationGuard.isolatedWorkspacesEnabled = false;
     secretSvc.create.mockResolvedValue({ id: "secret-created" });
     secretSvc.remove.mockResolvedValue(true);
     secretSvc.normalizeAdapterConfigForPersistence.mockImplementation(async (_companyId, config) => config);
@@ -3340,6 +3358,51 @@ describe("company portability", () => {
     });
 
     expect(preview.errors).toContain("Safe import does not allow project app workspace default setupCommand.");
+  });
+
+  it("rejects an unsafe planned project before an existing-company import mutates state", async () => {
+    const portability = companyPortabilityService({} as any);
+    isolationGuard.required = true;
+    isolationGuard.isolatedWorkspacesEnabled = true;
+    projectSvc.list.mockResolvedValue([]);
+
+    await expect(portability.importBundle({
+      source: {
+        type: "inline",
+        files: {
+          "COMPANY.md": "---\nname: Import\nincludes:\n  - projects/app/PROJECT.md\n---\n",
+          "projects/app/PROJECT.md": "---\nname: App\nslug: app\n---\n\n# App\n",
+          ".paperclip.yaml": [
+            "schema: paperclip/v1",
+            "projects:",
+            "  app:",
+            "    executionWorkspacePolicy:",
+            "      enabled: true",
+            "      defaultMode: shared_workspace",
+            "      allowIssueOverride: false",
+            "",
+          ].join("\n"),
+        },
+      },
+      include: {
+        company: false,
+        agents: false,
+        projects: true,
+        issues: false,
+      },
+      target: {
+        mode: "existing_company",
+        companyId: "company-1",
+      },
+      collisionStrategy: "rename",
+    }, "user-1")).rejects.toMatchObject({
+      status: 409,
+      details: { code: "company_isolated_project_workspace_required" },
+    });
+
+    expect(companySvc.update).not.toHaveBeenCalled();
+    expect(projectSvc.create).not.toHaveBeenCalled();
+    expect(projectSvc.update).not.toHaveBeenCalled();
   });
 
   it("reports invalid imported project env on agent-safe import preview", async () => {

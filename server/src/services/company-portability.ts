@@ -78,6 +78,12 @@ import {
   readPortableCatalogProvenance,
 } from "./catalog-provenance.js";
 import { normalizePortablePath } from "./portable-path.js";
+import {
+  assertCompanyProjectIsolationPolicy,
+  withCompanyProjectIsolationLock,
+  type CompanyProjectIsolationGuard,
+  type DbTransaction,
+} from "./company-project-isolation.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
 function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]): OrgNode[] {
@@ -4273,10 +4279,15 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     return plan.preview;
   }
 
-  async function importBundle(
+  async function importBundleUnlocked(
     input: CompanyPortabilityImport,
     actorUserId: string | null | undefined,
     options?: ImportBehaviorOptions,
+    isolationGuard: CompanyProjectIsolationGuard = {
+      required: false,
+      isolatedWorkspacesEnabled: false,
+    },
+    isolationLockTx?: DbTransaction,
   ): Promise<CompanyPortabilityImportResult> {
     const mode = resolveImportMode(options);
     const plan = await buildPreview(input, options);
@@ -4297,6 +4308,22 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const sourceManifest = plan.source.manifest;
     const warnings = [...plan.preview.warnings];
     const include = plan.include;
+    const importCompanies = isolationLockTx
+      ? companyService(isolationLockTx as unknown as Db)
+      : companies;
+
+    if (include.projects) {
+      for (const plannedProject of plan.preview.plan.projectPlans) {
+        if (plannedProject.action === "skip") continue;
+        const manifestProject = sourceManifest.projects.find(
+          (project) => project.slug === plannedProject.slug,
+        );
+        assertCompanyProjectIsolationPolicy(
+          isolationGuard,
+          manifestProject?.executionWorkspacePolicy ?? null,
+        );
+      }
+    }
 
     let targetCompany: {
       id: string;
@@ -4321,7 +4348,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         sourceManifest.company?.name ??
         sourceManifest.source?.companyName ??
         "Imported Company";
-      const created = await companies.create({
+      const created = await importCompanies.create({
         name: companyName,
         description: include.company ? (sourceManifest.company?.description ?? null) : null,
         brandColor: include.company ? (sourceManifest.company?.brandColor ?? null) : null,
@@ -4359,10 +4386,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       targetCompany = created;
       companyAction = "created";
     } else {
-      targetCompany = await companies.getById(input.target.companyId);
+      targetCompany = await importCompanies.getById(input.target.companyId);
       if (!targetCompany) throw notFound("Target company not found");
       if (include.company && sourceManifest.company && mode === "board_full") {
-        const updated = await companies.update(targetCompany.id, {
+        const updated = await importCompanies.update(targetCompany.id, {
           name: sourceManifest.company.name,
           description: sourceManifest.company.description,
           brandColor: sourceManifest.company.brandColor,
@@ -4415,7 +4442,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       if (include.company) {
         const logoPath = sourceManifest.company?.logoPath ?? null;
         if (!logoPath) {
-          const cleared = await companies.update(targetCompany.id, { logoAssetId: null });
+          const cleared = await importCompanies.update(targetCompany.id, { logoAssetId: null });
           targetCompany = cleared ?? targetCompany;
         } else {
           const logoFile = plan.source.files[logoPath];
@@ -4449,7 +4476,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                   createdByAgentId: null,
                   createdByUserId: actorUserId ?? null,
                 });
-                const updated = await companies.update(targetCompany.id, {
+                const updated = await importCompanies.update(targetCompany.id, {
                   logoAssetId: createdAsset.id,
                 });
                 targetCompany = updated ?? targetCompany;
@@ -4987,6 +5014,22 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       }
       throw error;
     }
+  }
+
+  async function importBundle(
+    input: CompanyPortabilityImport,
+    actorUserId: string | null | undefined,
+    options?: ImportBehaviorOptions,
+  ): Promise<CompanyPortabilityImportResult> {
+    if (input.target.mode !== "existing_company") {
+      return importBundleUnlocked(input, actorUserId, options);
+    }
+
+    return withCompanyProjectIsolationLock(
+      db,
+      input.target.companyId,
+      async (tx, guard) => importBundleUnlocked(input, actorUserId, options, guard, tx),
+    );
   }
 
   return {

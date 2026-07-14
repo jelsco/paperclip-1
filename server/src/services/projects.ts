@@ -32,6 +32,10 @@ import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runt
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import {
+  assertCompanyProjectIsolationPolicy,
+  withCompanyProjectIsolationLock,
+} from "./company-project-isolation.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -401,7 +405,12 @@ async function attachListMetrics(
 }
 
 /** Sync the project_goals join table for a single project. */
-async function syncGoalLinks(db: Db, projectId: string, companyId: string, goalIds: string[]) {
+async function syncGoalLinks(
+  db: Pick<Db, "delete" | "insert">,
+  projectId: string,
+  companyId: string,
+  goalIds: string[],
+) {
   // Delete existing links
   await db.delete(projectGoals).where(eq(projectGoals.projectId, projectId));
 
@@ -551,24 +560,28 @@ export function projectService(db: Db) {
     // Note: color is intentionally NOT auto-assigned. New projects default to
     // `color = null` (neutral gray) unless an explicit color is supplied. See PAP-68.
 
-    const existingProjects = await db
-      .select({ id: projects.id, name: projects.name })
-      .from(projects)
-      .where(eq(projects.companyId, companyId));
-    projectData.name = resolveProjectNameForUniqueShortname(projectData.name, existingProjects);
+    const row = await withCompanyProjectIsolationLock(db, companyId, async (tx, guard) => {
+      assertCompanyProjectIsolationPolicy(guard, projectData.executionWorkspacePolicy);
 
-    // Also write goalId to the legacy column (first goal or null)
-    const legacyGoalId = ids && ids.length > 0 ? ids[0] : projectData.goalId ?? null;
+      const existingProjects = await tx
+        .select({ id: projects.id, name: projects.name })
+        .from(projects)
+        .where(eq(projects.companyId, companyId));
+      projectData.name = resolveProjectNameForUniqueShortname(projectData.name, existingProjects);
 
-    const row = await db
-      .insert(projects)
-      .values({ ...projectData, goalId: legacyGoalId, companyId })
-      .returning()
-      .then((rows) => rows[0]);
+      // Also write goalId to the legacy column (first goal or null)
+      const legacyGoalId = ids && ids.length > 0 ? ids[0] : projectData.goalId ?? null;
+      const created = await tx
+        .insert(projects)
+        .values({ ...projectData, goalId: legacyGoalId, companyId })
+        .returning()
+        .then((rows) => rows[0]);
 
-    if (ids && ids.length > 0) {
-      await syncGoalLinks(db, row.id, companyId, ids);
-    }
+      if (ids && ids.length > 0) {
+        await syncGoalLinks(tx, created.id, companyId, ids);
+      }
+      return created;
+    });
 
     const [withGoals] = await attachGoals(db, [row]);
     const [enriched] = withGoals ? await attachWorkspaces(db, [withGoals]) : [];

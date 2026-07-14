@@ -925,6 +925,13 @@
       "when": 1783696952869,
       "tag": "0131_company_execution_admission_fence",
       "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1784044800000,
+      "tag": "0132_company_isolated_project_workspaces",
+      "breakpoints": true
     }
   ]
 }
