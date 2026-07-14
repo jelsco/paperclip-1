@@ -14,6 +14,7 @@ export interface Company {
   attachmentMaxBytes: number;
   defaultResponsibleUserId: string | null;
   requireBoardApprovalForNewAgents: boolean;
+  requireIsolatedProjectWorkspaces: boolean;
   feedbackDataSharingEnabled: boolean;
   feedbackDataSharingConsentAt: Date | null;
   feedbackDataSharingConsentByUserId: string | null;

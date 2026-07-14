@@ -56,6 +56,7 @@ describeEmbeddedPostgres("companyService", () => {
     const created = await companyService(db).create({
       name: "Aron & Sharon",
     });
+    expect(created.requireIsolatedProjectWorkspaces).toBe(false);
 
     expect(created.issuePrefix).toBe("AROA");
 
