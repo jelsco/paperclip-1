@@ -127,6 +127,38 @@ describe("assertCompanyAccess", () => {
     }
   });
 
+  it("allows a board-sentinel responsible user to read without a membership snapshot (RR #8280)", () => {
+    const req = makeReq({
+      method: "GET",
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        onBehalfOfUserId: "board",
+        onBehalfOfMemberships: [],
+        source: "agent_jwt",
+      },
+    });
+
+    expect(() => assertCompanyAccess(req, "company-1")).not.toThrow();
+  });
+
+  it("allows a board-sentinel responsible user to write without a membership snapshot (RR #8280)", () => {
+    const req = makeReq({
+      method: "PATCH",
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        onBehalfOfUserId: "local-board",
+        onBehalfOfMemberships: [],
+        source: "agent_jwt",
+      },
+    });
+
+    expect(() => assertCompanyAccess(req, "company-1")).not.toThrow();
+  });
+
   it("rejects on-behalf-of agent writes when the responsible user is read-only", () => {
     const req = makeReq({
       method: "PATCH",

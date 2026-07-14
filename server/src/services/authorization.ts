@@ -33,6 +33,18 @@ import { logger } from "../middleware/logger.js";
 // agent's own grant, so these bypass the intersection entirely.
 const BOARD_RESPONSIBLE_USER_SENTINELS: ReadonlySet<string> = new Set(["board", "local-board"]);
 
+/**
+ * True when a responsible-user id is a board-authority sentinel (`"board"` /
+ * `"local-board"`) rather than a real human user. Board authority is top-level and has
+ * no company membership to intersect, so every responsible-user guard must bypass the
+ * membership check for these ids instead of denying them as unavailable users. Exported
+ * so the company-access guard (`assertCompanyAccess`) shares the same sentinel set as
+ * the issue-level intersection below — see RR issues #7941 and #8280.
+ */
+export function isBoardResponsibleUserSentinel(userId: string | null | undefined): boolean {
+  return userId != null && BOARD_RESPONSIBLE_USER_SENTINELS.has(userId);
+}
+
 export type AuthorizationActor =
   {
     type: "board" | "agent" | "none";
