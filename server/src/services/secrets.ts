@@ -36,6 +36,7 @@ import {
   createSecretProviderConfigSchema,
   deriveProjectUrlKey,
   envBindingSchema,
+  isPaperclipReservedEnvKey,
   isUuidLike,
   normalizeAgentUrlKey,
   secretProviderConfigPayloadSchema,
@@ -449,11 +450,16 @@ export function secretService(db: Db) {
   type NormalizeEnvOptions = {
     strictMode?: boolean;
     fieldPath?: string;
+    // Company-portability imports carry historical env objects that may include
+    // reserved keys tolerated (and stripped at run time) by older versions;
+    // rejecting them would break import round-trips, so imports opt out.
+    allowReservedEnvKeys?: boolean;
   };
   type NormalizeAdapterConfigOptions = {
     strictMode?: boolean;
     adapterType?: string | null;
     actor?: { userId?: string | null; agentId?: string | null };
+    allowReservedEnvKeys?: boolean;
   };
 
   async function getById(id: string, source: Pick<Db | DbTransaction, "select"> = db) {
@@ -981,6 +987,16 @@ export function secretService(db: Db) {
     for (const [key, rawBinding] of Object.entries(record)) {
       if (!ENV_KEY_RE.test(key)) {
         throw unprocessable(`Invalid environment variable name: ${key}`);
+      }
+      if (!opts?.allowReservedEnvKeys && isPaperclipReservedEnvKey(key)) {
+        // Runtime injects PAPERCLIP_* vars at dispatch and strips any
+        // operator-supplied binding with the prefix before every run, so
+        // accepting the key here would silently ignore it later (#8711/#8728).
+        throw unprocessable(
+          `${opts?.fieldPath ?? "env"}.${key} uses the reserved PAPERCLIP_ prefix; ` +
+          `these variables are injected by Paperclip at run time and operator-supplied ` +
+          `values are ignored. Remove the key or rename it.`,
+        );
       }
 
       const parsed = envBindingSchema.safeParse(rawBinding);

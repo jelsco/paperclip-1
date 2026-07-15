@@ -1308,6 +1308,8 @@ export {
   type RequestApprovalRevision,
   type ResubmitApproval,
   type AddApprovalComment,
+  PAPERCLIP_RESERVED_ENV_PREFIX,
+  isPaperclipReservedEnvKey,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingUserSecretRefSchema,

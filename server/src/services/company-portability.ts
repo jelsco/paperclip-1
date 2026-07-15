@@ -3056,7 +3056,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const normalizedAdapterConfig = await secrets.normalizeAdapterConfigForPersistence(
       companyId,
       nextAdapterConfig,
-      { strictMode: strictSecretsMode, adapterType: effectiveAdapterType },
+      { strictMode: strictSecretsMode, adapterType: effectiveAdapterType, allowReservedEnvKeys: true },
     );
     await assertImportAdapterConfigConstraints(effectiveAdapterType, normalizedAdapterConfig);
     return {
@@ -4037,6 +4037,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             {
               strictMode: strictSecretsMode,
               fieldPath: `projects.${project.slug}.env`,
+              allowReservedEnvKeys: true,
             },
           );
         } catch (err) {
@@ -4740,6 +4741,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                 {
                   strictMode: strictSecretsMode,
                   fieldPath: `projects.${manifestProject.slug}.env`,
+                  allowReservedEnvKeys: true,
                 },
               )
             : null;

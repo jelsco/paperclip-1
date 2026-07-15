@@ -11,6 +11,17 @@ const secretKeySchema = z.string().trim().min(1).max(120).regex(/^[a-zA-Z0-9_.-]
 const secretVersionSelectorSchema = z.union([z.literal("latest"), z.number().int().positive()]);
 const creatableSecretStatusSchema = z.enum(["active", "disabled", "archived"]);
 
+// Paperclip injects PAPERCLIP_* env vars (API URL/key, company/agent ids,
+// runtime + workspace context) at dispatch time and strips any operator-supplied
+// binding with this prefix before every run. Config writes must reject the
+// prefix so an operator-supplied binding is not accepted and then silently
+// ignored at run time.
+export const PAPERCLIP_RESERVED_ENV_PREFIX = "PAPERCLIP_";
+
+export function isPaperclipReservedEnvKey(key: string): boolean {
+  return key.startsWith(PAPERCLIP_RESERVED_ENV_PREFIX);
+}
+
 export const envBindingPlainSchema = z.object({
   type: z.literal("plain"),
   value: z.string(),

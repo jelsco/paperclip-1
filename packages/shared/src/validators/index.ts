@@ -465,6 +465,8 @@ export {
 } from "./approval.js";
 
 export {
+  PAPERCLIP_RESERVED_ENV_PREFIX,
+  isPaperclipReservedEnvKey,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingUserSecretRefSchema,

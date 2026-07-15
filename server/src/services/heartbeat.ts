@@ -203,7 +203,7 @@ import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
-import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
+import { extractSkillMentionIds, isPaperclipReservedEnvKey, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
 import { isOsIdentitySshEnvironment } from "./environment-config.js";
@@ -518,8 +518,11 @@ export function requiresPushCapabilityPreflight(input: {
 const LOW_TRUST_SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
 
+// Shared with config-write validation (normalizeEnvConfig rejects the reserved
+// prefix with a 422) so the strip below can never silently discard a key that
+// was accepted at write time.
 function isPaperclipRuntimeEnvKey(key: string) {
-  return key.startsWith("PAPERCLIP_");
+  return isPaperclipReservedEnvKey(key);
 }
 
 function stripPaperclipRuntimeEnvBindings(envValue: unknown): Record<string, unknown> | null {

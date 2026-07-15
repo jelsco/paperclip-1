@@ -116,6 +116,53 @@ describeEmbeddedPostgres("secretService", () => {
     ).rejects.toThrow(/same company/i);
   });
 
+  it("rejects reserved PAPERCLIP_* env keys during env normalization", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    await expect(
+      svc.normalizeEnvBindingsForPersistence(companyId, {
+        PAPERCLIP_API_URL: { type: "plain", value: "http://example.test:3100" },
+      }),
+    ).rejects.toThrow(/reserved PAPERCLIP_ prefix/i);
+  });
+
+  it("names the field path when rejecting a reserved env key", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    await expect(
+      svc.normalizeEnvBindingsForPersistence(
+        companyId,
+        { PAPERCLIP_AGENT_ID: "abc" },
+        { fieldPath: "routine.env" },
+      ),
+    ).rejects.toThrow(/routine\.env\.PAPERCLIP_AGENT_ID/);
+  });
+
+  it("allows reserved PAPERCLIP_* env keys when explicitly opted out (portability import)", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    const normalized = await svc.normalizeEnvBindingsForPersistence(
+      companyId,
+      { PAPERCLIP_API_URL: { type: "plain", value: "http://example.test:3100" }, KEEP: "x" },
+      { allowReservedEnvKeys: true },
+    );
+    expect(Object.keys(normalized).sort()).toEqual(["KEEP", "PAPERCLIP_API_URL"]);
+  });
+
+  it("rejects reserved PAPERCLIP_* env keys inside adapterConfig normalization", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    await expect(
+      svc.normalizeAdapterConfigForPersistence(companyId, {
+        env: { PAPERCLIP_COMPANY_ID: { type: "plain", value: "nope" } },
+      }),
+    ).rejects.toThrow(/reserved PAPERCLIP_ prefix/i);
+  });
+
   it("prevents duplicate bindings for a target config path", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);
