@@ -2797,6 +2797,27 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   };
 }
 
+export async function getPersistedWorkspaceReuseInvalidReason(input: {
+  workspace: ExecutionWorkspace | null;
+  expectedProjectWorkspaceId: string | null;
+}): Promise<string | null> {
+  const workspace = input.workspace;
+  if (!workspace) return null;
+  if (
+    input.expectedProjectWorkspaceId &&
+    !workspace.projectWorkspaceId
+  ) return "missing_project_workspace_id";
+  if (
+    input.expectedProjectWorkspaceId &&
+    workspace.projectWorkspaceId !== input.expectedProjectWorkspaceId
+  ) return "project_workspace_mismatch";
+  if (workspace.strategyType !== "project_primary") return null;
+  const cwd = readNonEmptyString(workspace.cwd);
+  if (!cwd) return "missing_cwd";
+  const hasGitMetadata = await fs.stat(path.resolve(cwd, ".git")).then(() => true).catch(() => false);
+  return hasGitMetadata ? null : "missing_git_metadata";
+}
+
 export function resolveExecutionWorkspaceReuseProvisioningPolicy(input: {
   requestedShouldReuseExisting: boolean;
   workspaceConfigFreshness: ExecutionWorkspaceConfigFreshnessDecision;
@@ -10271,16 +10292,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const requestedExecutionWorkspaceId = readNonEmptyString(issueRef?.executionWorkspaceId);
     const existingExecutionWorkspace =
       requestedExecutionWorkspaceId ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId) : null;
-    const workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+    let workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
       issueExecutionWorkspacePreference: issueRef?.executionWorkspacePreference ?? null,
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
     });
-    const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
-    const reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
+    let requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
+    let reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
       ? existingExecutionWorkspace
       : null;
-    const requestedReusableExecutionWorkspaceConfig = reusableExistingExecutionWorkspace?.config ?? null;
+    let requestedReusableExecutionWorkspaceConfig = reusableExistingExecutionWorkspace?.config ?? null;
     const localEnvironment = await environmentsSvc.ensureLocalEnvironment(agent.companyId);
     const resolvedInstanceSettings = await instanceSettings.get();
     const environmentResolution = resolveExecutionWorkspaceEnvironmentId({
@@ -10576,6 +10597,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           { useProjectWorkspace: requestedExecutionWorkspaceMode !== "agent_default" },
         ),
     });
+    const invalidReuseReason = requestedShouldReuseExisting
+      ? await getPersistedWorkspaceReuseInvalidReason({
+          workspace: reusableExistingExecutionWorkspace,
+          expectedProjectWorkspaceId: issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId ?? null,
+        })
+      : null;
+    if (invalidReuseReason && reusableExistingExecutionWorkspace) {
+      const staleWorkspaceId = reusableExistingExecutionWorkspace.id;
+      await executionWorkspacesSvc.update(staleWorkspaceId, {
+        status: "archived",
+        closedAt: new Date(),
+        cleanupEligibleAt: new Date(),
+        cleanupReason: `invalid_reuse_${invalidReuseReason}`,
+      });
+      if (issueId) {
+        await issuesSvc.update(issueId, {
+          executionWorkspaceId: null,
+          executionWorkspacePreference: null,
+        });
+      }
+      logger.warn(
+        { runId: run.id, issueId, staleWorkspaceId, invalidReuseReason },
+        "Discarded invalid persisted execution workspace before reuse",
+      );
+      workspaceReuseRequest = {
+        requestedExecutionWorkspaceId: null,
+        requestedShouldReuseExisting: false,
+        existingExecutionWorkspaceAvailable: false,
+      };
+      requestedShouldReuseExisting = false;
+      reusableExistingExecutionWorkspace = null;
+      requestedReusableExecutionWorkspaceConfig = null;
+    }
     const hostExecutionWorkspaceConfig = stripHostWorkspaceProvisionForLowTrustSandbox({
       config: mergedConfig,
       trustPreset,

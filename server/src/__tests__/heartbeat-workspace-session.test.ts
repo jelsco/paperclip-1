@@ -18,6 +18,7 @@ import {
   deriveTaskKeyWithHeartbeatFallback,
   extractWakeCommentIds,
   formatRuntimeWorkspaceWarningLog,
+  getPersistedWorkspaceReuseInvalidReason,
   mergeExecutionWorkspaceMetadataForPersistence,
   mergeCoalescedContextSnapshot,
   preflightLowTrustWorkspaceIsolation,
@@ -450,6 +451,34 @@ describe("assertGitSensitiveAdapterWorkspaceValid", () => {
         }),
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("getPersistedWorkspaceReuseInvalidReason", () => {
+  it("rejects stale project-primary rows without a project workspace binding", async () => {
+    const workspace = buildWorkspaceValidationInput().persistedExecutionWorkspace!;
+    await expect(getPersistedWorkspaceReuseInvalidReason({
+      workspace: { ...workspace, projectWorkspaceId: null },
+      expectedProjectWorkspaceId: "workspace-1",
+    })).resolves.toBe("missing_project_workspace_id");
+  });
+
+  it("rejects project-primary rows whose cwd no longer has git metadata", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-stale-workspace-"));
+    const workspace = buildWorkspaceValidationInput().persistedExecutionWorkspace!;
+    await expect(getPersistedWorkspaceReuseInvalidReason({
+      workspace: { ...workspace, cwd },
+      expectedProjectWorkspaceId: "workspace-1",
+    })).resolves.toBe("missing_git_metadata");
+  });
+
+  it("accepts a matching project-primary git checkout", async () => {
+    const cwd = await createGitCheckout({ withRemote: false });
+    const workspace = buildWorkspaceValidationInput().persistedExecutionWorkspace!;
+    await expect(getPersistedWorkspaceReuseInvalidReason({
+      workspace: { ...workspace, cwd },
+      expectedProjectWorkspaceId: "workspace-1",
+    })).resolves.toBeNull();
   });
 });
 
