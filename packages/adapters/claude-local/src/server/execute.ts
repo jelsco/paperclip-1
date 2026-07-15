@@ -907,7 +907,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
     const claudeRefusal = isClaudeRefusalResult(parsed);
     const parsedIsError = asBoolean(parsed.is_error, false);
-    const failed = (proc.exitCode ?? 0) !== 0 || parsedIsError;
+    // A well-formed terminal result with subtype=success and is_error=false is
+    // authoritative over the raw process exit code: os_identity SSH teardown can
+    // exit 255 and the grace-kill SIGTERM path exits 143 AFTER the result has
+    // already streamed. Treating those as failures makes recovery re-execute
+    // completed side-effectful work. The server derives the run outcome from
+    // exitCode + errorMessage, so report exit 0 and keep the raw exit code as
+    // metadata in resultJson.processExitCode.
+    const parsedReportsSuccess = asString(parsed.subtype, "") === "success" && !parsedIsError;
+    const failed = !parsedReportsSuccess && ((proc.exitCode ?? 0) !== 0 || parsedIsError);
+    const exitCodeOverriddenBySuccess = parsedReportsSuccess && (proc.exitCode ?? 0) !== 0;
+    const effectiveExitCode = exitCodeOverriddenBySuccess ? 0 : proc.exitCode;
     // Validate-before-persist guard: never persist a sessionId whose transcript
     // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
     // session id; if the last entry contains a non-`msg_`-prefixed
@@ -954,7 +964,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage,
         })
       : null;
-    const resolvedErrorCode = loginMeta.requiresLogin
+    const resolvedErrorCode = failed && loginMeta.requiresLogin
       ? "claude_auth_required"
       : failed && clearSessionForMaxTurns
       ? "max_turns_exhausted"
@@ -967,6 +977,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
     const mergedResultJson: Record<string, unknown> = {
       ...parsed,
+      ...(exitCodeOverriddenBySuccess ? { processExitCode: proc.exitCode } : {}),
       ...(failed && clearSessionForMaxTurns ? { stopReason: "max_turns_exhausted" } : {}),
       ...(failed && poisonedPreviousMessageId ? { stopReason: "claude_poisoned_previous_message_id" } : {}),
       ...(claudeRefusal ? { stopReason: "refusal", errorFamily: "model_refusal" } : {}),
@@ -976,7 +987,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
 
     return {
-      exitCode: proc.exitCode,
+      exitCode: effectiveExitCode,
       signal: proc.signal,
       timedOut: false,
       errorMessage,

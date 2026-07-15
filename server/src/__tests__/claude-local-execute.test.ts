@@ -582,6 +582,123 @@ describe("claude execute", () => {
     }
   });
 
+  it("trusts a parsed success result over a nonzero ssh-teardown exit code", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-success-255-"));
+    const resultEvent = {
+      type: "result",
+      subtype: "success",
+      session_id: "11111111-1111-4111-8111-111111111111",
+      is_error: false,
+      result: "Posted the daily summary.",
+      usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+    };
+    const { workspace, commandPath, restore } = await setupExecuteEnv(root, {
+      commandWriter: (commandPath) => writeFailingClaudeCommand(commandPath, { resultEvent, exitCode: 255 }),
+    });
+
+    try {
+      const result = await execute({
+        runId: "run-success-exit-255",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+      expect(result.errorCode).toBeNull();
+      expect(result.errorFamily).toBeNull();
+      expect(result.resultJson).toMatchObject({ subtype: "success", processExitCode: 255 });
+      expect(result.summary).toBe("Posted the daily summary.");
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("trusts a parsed success result over a grace-kill SIGTERM exit code", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-success-143-"));
+    const resultEvent = {
+      type: "result",
+      subtype: "success",
+      session_id: "11111111-1111-4111-8111-111111111111",
+      is_error: false,
+      result: "Done.",
+      usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+    };
+    const { workspace, commandPath, restore } = await setupExecuteEnv(root, {
+      commandWriter: (commandPath) => writeFailingClaudeCommand(commandPath, { resultEvent, exitCode: 143 }),
+    });
+
+    try {
+      const result = await execute({
+        runId: "run-success-exit-143",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+      expect(result.errorCode).toBeNull();
+      expect(result.resultJson).toMatchObject({ subtype: "success", processExitCode: 143 });
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still fails a parsed error result regardless of exit-code handling", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-error-255-"));
+    const resultEvent = {
+      type: "result",
+      subtype: "error",
+      session_id: "11111111-1111-4111-8111-111111111111",
+      is_error: true,
+      result: "Something broke.",
+    };
+    const { workspace, commandPath, restore } = await setupExecuteEnv(root, {
+      commandWriter: (commandPath) => writeFailingClaudeCommand(commandPath, { resultEvent, exitCode: 255 }),
+    });
+
+    try {
+      const result = await execute({
+        runId: "run-error-exit-255",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(255);
+      expect(result.errorMessage).not.toBeNull();
+      expect(result.resultJson?.processExitCode).toBeUndefined();
+    } finally {
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not normalize unstructured max-turn text into scheduler stop metadata", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-max-turn-text-"));
     const resultEvent = {
