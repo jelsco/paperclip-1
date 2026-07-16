@@ -2128,17 +2128,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   async function resolveStrandedIssueRecoveryOwnerAgentId(
     issue: typeof issues.$inferSelect,
     preferredOwnerAgentId?: string | null,
+    options?: { allowNonInvokableManagementChainOwner?: boolean },
   ) {
-    const candidateIds: string[] = [];
-    if (preferredOwnerAgentId) candidateIds.push(preferredOwnerAgentId);
-    if (issue.assigneeAgentId) {
-      const assignee = await getAgent(issue.assigneeAgentId);
-      if (assignee?.reportsTo) candidateIds.push(assignee.reportsTo);
-    }
+    const managementChainCandidateIds: string[] = [];
+    if (preferredOwnerAgentId) managementChainCandidateIds.push(preferredOwnerAgentId);
+    const pushManagementChain = async (startAgentId: string | null | undefined) => {
+      const visited = new Set<string>();
+      let cursor = startAgentId ? await getAgent(startAgentId) : null;
+      while (cursor?.reportsTo && !visited.has(cursor.reportsTo)) {
+        visited.add(cursor.reportsTo);
+        managementChainCandidateIds.push(cursor.reportsTo);
+        cursor = await getAgent(cursor.reportsTo);
+      }
+    };
+    await pushManagementChain(issue.assigneeAgentId);
     if (issue.createdByAgentId) {
-      const creator = await getAgent(issue.createdByAgentId);
-      if (creator?.reportsTo) candidateIds.push(creator.reportsTo);
-      candidateIds.push(issue.createdByAgentId);
+      await pushManagementChain(issue.createdByAgentId);
+      managementChainCandidateIds.push(issue.createdByAgentId);
     }
 
     const roleCandidates = await db
@@ -2146,8 +2152,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .from(agents)
       .where(and(eq(agents.companyId, issue.companyId), inArray(agents.role, ["cto", "ceo"])))
       .orderBy(sql`case when ${agents.role} = 'cto' then 0 else 1 end`, asc(agents.createdAt));
-    candidateIds.push(...roleCandidates.map((agent) => agent.id));
+    const roleCandidateIds = new Set(roleCandidates.map((agent) => agent.id));
+    const candidateIds = [...managementChainCandidateIds, ...roleCandidates.map((agent) => agent.id)];
     if (issue.assigneeAgentId) candidateIds.push(issue.assigneeAgentId);
+    const managementChainCandidateIdSet = new Set(managementChainCandidateIds);
 
     const seen = new Set<string>();
     for (const agentId of candidateIds) {
@@ -2159,7 +2167,29 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         issueId: issue.id,
         projectId: issue.projectId,
       });
-      if ((await isAgentInvokable(candidate)) && !budgetBlock) return candidate.id;
+      if ((await isAgentInvokable(candidate)) && !budgetBlock) {
+        if (roleCandidateIds.has(candidate.id) && !managementChainCandidateIdSet.has(candidate.id)) {
+          logger.warn({
+            issueId: issue.id,
+            companyId: issue.companyId,
+            ownerAgentId: candidate.id,
+            role: candidate.role,
+          }, "stranded-issue recovery owner fell back to cto/ceo role candidate; management chain had no invokable owner");
+        }
+        return candidate.id;
+      }
+    }
+
+    // Manual-repair recoveries do not need the owner to be invokable right now -
+    // the ownership is a routing decision, not a wake. Keep the issue with the
+    // management chain instead of escalating it to the cto/ceo role fallback.
+    if (options?.allowNonInvokableManagementChainOwner) {
+      for (const agentId of managementChainCandidateIds) {
+        const candidate = await getAgent(agentId);
+        if (!candidate || candidate.companyId !== issue.companyId) continue;
+        if (candidate.status === "terminated") continue;
+        return candidate.id;
+      }
     }
 
     return null;
@@ -2415,6 +2445,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const ownerAgentId = await resolveStrandedIssueRecoveryOwnerAgentId(
       input.issue,
       input.recoveryOwnerAgentId,
+      {
+        allowNonInvokableManagementChainOwner:
+          recoveryCause === "workspace_validation_failed" || recoveryCause === "configuration_incomplete",
+      },
     );
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
