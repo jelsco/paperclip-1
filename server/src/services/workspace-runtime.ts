@@ -653,7 +653,7 @@ async function remoteExists(repoRoot: string, remote: string): Promise<boolean> 
 
 const GIT_WORKTREE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 
-type GitWorktreeCleanliness = "clean" | "dirty" | "unknown";
+type GitWorktreeCleanliness = "clean" | "untracked_only" | "dirty" | "unknown";
 
 type GitWorktreeBranchIncoherenceEvidence = {
   reason: typeof GIT_WORKTREE_BRANCH_INCOHERENCE_REASON;
@@ -678,6 +678,8 @@ type GitWorktreeBranchIncoherenceEvidence = {
     expectedHeadSha: string | null;
     actualHeadSha: string | null;
     sameHead: boolean;
+    expectedBranchWorktreePath: string | null;
+    expectedBranchCheckedOutElsewhere: boolean;
   };
   safeRepair: {
     eligible: boolean;
@@ -725,6 +727,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   actualBranchName: string | null;
   sourceIssue: ExecutionWorkspaceIssueRef | null;
   executionWorkspaceId?: string | null;
+  allowBranchSwitchRepair?: boolean;
 }): Promise<GitWorktreeBranchIncoherenceEvidence> {
   const status = await runGit(
     ["status", "--porcelain", "--untracked-files=all"],
@@ -732,9 +735,15 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   ).catch(() => null);
   const statusLines = status === null
     ? null
-    : status.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    : status.split(/\r?\n/).filter((line) => line.trim().length > 0);
   const cleanliness: GitWorktreeCleanliness =
-    status === null ? "unknown" : status.trim().length > 0 ? "dirty" : "clean";
+    statusLines === null
+      ? "unknown"
+      : statusLines.length === 0
+        ? "clean"
+        : statusLines.every((line) => line.startsWith("??"))
+          ? "untracked_only"
+          : "dirty";
   const expectedHeadSha = await runGit(
     ["rev-parse", "--verify", `refs/heads/${input.expectedBranchName}^{commit}`],
     input.repoRoot,
@@ -749,20 +758,63 @@ async function inspectGitWorktreeBranchIncoherence(input: {
   const registeredBranchMatchesHead = Boolean(registered && registeredBranchRef === actualBranchRef);
   const sameHead = Boolean(expectedHeadSha && actualHeadSha && expectedHeadSha === actualHeadSha);
   const expectedBranchExists = Boolean(expectedHeadSha);
-  const eligible = cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
+  const expectedBranchWorktreePath = expectedBranchExists
+    ? await findRegisteredGitWorktreeByBranch(input.repoRoot, input.expectedBranchName)
+    : null;
+  const expectedBranchCheckedOutElsewhere = Boolean(
+    expectedBranchWorktreePath &&
+    await resolvePathForWorktreeComparison(expectedBranchWorktreePath) !==
+      await resolvePathForWorktreeComparison(input.worktreePath),
+  );
+  // When a branch switch is allowed (workspace reuse/prepare), a checkout is
+  // safe when nothing can be lost: tracked changes block it outright
+  // (untracked-only dirt is preserved by `git checkout`, and git itself
+  // refuses on a collision with the target branch), a detached HEAD on a
+  // different commit could strand commits that live on no branch, and a
+  // branch checked out in another worktree cannot be checked out here at all.
+  // Without it (post-run finalize), only the degenerate same-commit symbolic
+  // ref fixup is safe — switching commits there would silently mask an
+  // unrecorded branch transition made by the run itself.
+  const treeRepairSafe = cleanliness === "clean" || cleanliness === "untracked_only";
+  const headOnBranchOrSame = input.actualBranchName !== null || sameHead;
+  const eligible = input.allowBranchSwitchRepair
+    ? treeRepairSafe &&
+      expectedBranchExists &&
+      registeredBranchMatchesHead &&
+      !expectedBranchCheckedOutElsewhere &&
+      headOnBranchOrSame
+    : cleanliness === "clean" && expectedBranchExists && sameHead && registeredBranchMatchesHead;
   const safeRepairReason = eligible
-    ? "clean worktree and expected branch points at the current HEAD"
-    : cleanliness !== "clean"
-      ? "worktree is not clean"
-      : !registered
-        ? "worktree path is not registered"
-      : !registeredBranchMatchesHead
-        ? "registered worktree branch does not match HEAD"
-      : !expectedBranchExists
-        ? "expected branch does not exist"
-        : !sameHead
-          ? "expected branch and current HEAD differ"
-          : "safe repair could not be proven";
+    ? sameHead
+      ? "clean worktree and expected branch points at the current HEAD"
+      : cleanliness === "untracked_only"
+        ? "worktree has only untracked files and the expected branch can be checked out"
+        : "clean worktree and the expected branch can be checked out"
+    : input.allowBranchSwitchRepair
+      ? !treeRepairSafe
+        ? "worktree is not clean"
+        : !registered
+          ? "worktree path is not registered"
+        : !registeredBranchMatchesHead
+          ? "registered worktree branch does not match HEAD"
+        : !expectedBranchExists
+          ? "expected branch does not exist"
+        : expectedBranchCheckedOutElsewhere
+          ? `expected branch is checked out in another worktree at "${expectedBranchWorktreePath}"`
+        : !headOnBranchOrSame
+          ? "worktree HEAD is detached on a different commit"
+            : "safe repair could not be proven"
+      : cleanliness !== "clean"
+        ? "worktree is not clean"
+        : !registered
+          ? "worktree path is not registered"
+        : !registeredBranchMatchesHead
+          ? "registered worktree branch does not match HEAD"
+        : !expectedBranchExists
+          ? "expected branch does not exist"
+          : !sameHead
+            ? "expected branch and current HEAD differ"
+            : "safe repair could not be proven";
   const fingerprint = fingerprintWorkspaceBranchIncoherence({
     sourceIssueId: input.sourceIssue?.id ?? null,
     executionWorkspaceId: input.executionWorkspaceId ?? null,
@@ -797,6 +849,8 @@ async function inspectGitWorktreeBranchIncoherence(input: {
       expectedHeadSha,
       actualHeadSha,
       sameHead,
+      expectedBranchWorktreePath,
+      expectedBranchCheckedOutElsewhere,
     },
     safeRepair: {
       eligible,
@@ -824,6 +878,9 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   executionWorkspaceId?: string | null;
   actualBranchName?: string | null;
   recorder?: WorkspaceOperationRecorder | null;
+  // Reuse/prepare paths may safely check the worktree over to the expected
+  // branch (nothing is lost); post-run finalize must not, so it stays strict.
+  allowBranchSwitchRepair?: boolean;
 }) {
   const expectedBranchName = input.expectedBranchName?.trim();
   if (!expectedBranchName) return;
@@ -840,6 +897,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     actualBranchName: currentBranch,
     sourceIssue: input.sourceIssue,
     executionWorkspaceId: input.executionWorkspaceId ?? null,
+    allowBranchSwitchRepair: input.allowBranchSwitchRepair ?? false,
   });
 
   if (!evidence.safeRepair.eligible) {
@@ -862,7 +920,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
         sourceIssueId: evidence.sourceIssueId,
         executionWorkspaceId: evidence.executionWorkspaceId,
       },
-      successMessage: `Repaired clean git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
+      successMessage: `Repaired git worktree branch mismatch at ${input.worktreePath}: checked out ${expectedBranchName}\n`,
       failureLabel: `git checkout ${expectedBranchName}`,
     });
   } catch (error) {
@@ -880,7 +938,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   }
 
   evidence.safeRepair.succeeded = true;
-  evidence.safeRepair.reason = "clean worktree checked out the recorded branch";
+  evidence.safeRepair.reason = "worktree checked out the expected branch";
 }
 
 // Resolve the authoritative base ref for a fresh worktree. A configured local
@@ -1704,6 +1762,7 @@ export async function realizeExecutionWorkspace(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: null,
         recorder: input.recorder ?? null,
+        allowBranchSwitchRepair: true,
       });
       return await validateLinkedGitWorktree({
         repoRoot,
@@ -1869,6 +1928,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         sourceIssue: input.issue,
         executionWorkspaceId: input.workspace.id ?? null,
         recorder: input.recorder ?? null,
+        allowBranchSwitchRepair: true,
       });
     }
     const validation = await validateLinkedGitWorktree({

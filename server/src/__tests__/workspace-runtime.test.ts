@@ -2152,7 +2152,7 @@ describe("realizeExecutionWorkspace", () => {
     await fs.mkdir(path.dirname(worktreePath), { recursive: true });
     await runGit(repoRoot, ["branch", expectedBranch]);
     await runGit(repoRoot, ["worktree", "add", "-b", actualBranch, worktreePath, "HEAD"]);
-    await fs.writeFile(path.join(worktreePath, "untracked.txt"), "not safe to switch\n", "utf8");
+    await fs.writeFile(path.join(worktreePath, "README.md"), "tracked modification - not safe to switch\n", "utf8");
 
     await expect(ensurePersistedExecutionWorkspaceAvailable({
       base: {
@@ -2265,7 +2265,7 @@ describe("realizeExecutionWorkspace", () => {
     });
   }, 15_000);
 
-  it("rejects an existing persisted git worktree when the checked-out branch changed to a different commit", async () => {
+  it("repairs a clean persisted git worktree when the checked-out branch changed to a different commit", async () => {
     const repoRoot = await createTempRepo();
 
     const initial = await realizeExecutionWorkspace({
@@ -2300,8 +2300,10 @@ describe("realizeExecutionWorkspace", () => {
     await fs.writeFile(path.join(initial.cwd, "publish.txt"), "publish\n", "utf8");
     await runGit(initial.cwd, ["add", "publish.txt"]);
     await runGit(initial.cwd, ["commit", "-m", "Add publish branch work"]);
+    const publishHead = await readGit(initial.cwd, ["rev-parse", "HEAD"]);
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
 
-    await expect(ensurePersistedExecutionWorkspaceAvailable({
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
       base: {
         baseCwd: repoRoot,
         source: "project_primary",
@@ -2332,28 +2334,172 @@ describe("realizeExecutionWorkspace", () => {
         name: "Codex Coder",
         companyId: "company-1",
       },
+      recorder,
+    });
+
+    expect(restored?.cwd).toBe(initial.cwd);
+    await expect(readGit(initial.cwd, ["branch", "--show-current"])).resolves.toBe(initial.branchName);
+    // The sibling branch keeps its committed work; nothing is destroyed.
+    await expect(readGit(initial.cwd, ["rev-parse", `refs/heads/${actualBranch}`])).resolves.toBe(publishHead);
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "worktree_prepare",
+          command: `git checkout ${initial.branchName}`,
+          metadata: expect.objectContaining({
+            branchIncoherenceRepair: true,
+            expectedBranchName: initial.branchName,
+            actualBranchName: actualBranch,
+          }),
+        }),
+      ]),
+    );
+  }, 15_000);
+
+  it("repairs a persisted git worktree branch mismatch when the only dirt is untracked files", async () => {
+    const repoRoot = await createTempRepo();
+
+    const initial = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-457",
+        title: "Repair untracked-only branch mismatch",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+
+    const actualBranch = "PAP-457-sibling-work";
+    await runGit(initial.cwd, ["checkout", "-b", actualBranch]);
+    await fs.mkdir(path.join(initial.cwd, "backend", ".venv"), { recursive: true });
+    await fs.writeFile(path.join(initial.cwd, "backend", ".venv", "pyvenv.cfg"), "home = /usr\n", "utf8");
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-4",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: initial.cwd,
+        providerRef: initial.worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: initial.branchName,
+      },
+      issue: {
+        id: "issue-4",
+        identifier: "PAP-457",
+        title: "Repair untracked-only branch mismatch",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+    });
+
+    expect(restored?.cwd).toBe(initial.cwd);
+    await expect(readGit(initial.cwd, ["branch", "--show-current"])).resolves.toBe(initial.branchName);
+    // Untracked dirt survives the repair.
+    await expect(fs.readFile(path.join(initial.cwd, "backend", ".venv", "pyvenv.cfg"), "utf8")).resolves.toBe("home = /usr\n");
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "worktree_prepare",
+          command: `git checkout ${initial.branchName}`,
+          metadata: expect.objectContaining({
+            branchIncoherenceRepair: true,
+          }),
+        }),
+      ]),
+    );
+  }, 15_000);
+
+  it("rejects a branch mismatch repair when the expected branch is checked out in another worktree", async () => {
+    const repoRoot = await createTempRepo();
+    const expectedBranch = "PAP-458-expected-branch";
+    const actualBranch = "PAP-458-actual-branch";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", expectedBranch);
+    const otherWorktreePath = path.join(repoRoot, ".paperclip", "worktrees", "PAP-458-other");
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", expectedBranch, otherWorktreePath, "HEAD"]);
+    await runGit(repoRoot, ["worktree", "add", "-b", actualBranch, worktreePath, "HEAD"]);
+
+    await expect(ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-5",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: expectedBranch,
+      },
+      issue: {
+        id: "issue-5",
+        identifier: "PAP-458",
+        title: "Reject repair when branch is checked out elsewhere",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
     })).rejects.toMatchObject({
       code: "workspace_validation_failed",
       resultJson: {
         workspaceValidation: expect.objectContaining({
           reason: "git_worktree_branch_incoherence",
-          fingerprint: expect.stringMatching(/^workspace_incoherence:v1:sha256:/),
-          sourceIssueId: "issue-3",
-          sourceIdentifier: "PAP-456",
-          executionWorkspaceId: "execution-workspace-3",
-          expectedBranch: initial.branchName,
+          expectedBranch,
           actualBranch,
           cleanliness: "clean",
           provenance: expect.objectContaining({
-            expectedBranchExists: true,
-            actualBranchExists: true,
-            sameHead: false,
+            expectedBranchCheckedOutElsewhere: true,
           }),
           safeRepair: expect.objectContaining({
             eligible: false,
             attempted: false,
             succeeded: false,
-            reason: "expected branch and current HEAD differ",
+            reason: expect.stringContaining("expected branch is checked out in another worktree"),
           }),
         }),
       },
