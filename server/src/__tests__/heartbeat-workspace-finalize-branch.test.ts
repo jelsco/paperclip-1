@@ -387,7 +387,7 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     });
   }, 20_000);
 
-  it("fails unrecorded branch drift when the checked-out branch has different commits", async () => {
+  it("repairs unrecorded branch drift with commits back to the expected branch and records the transition", async () => {
     const repoRoot = await createGitRepo();
     tempRoots.push(repoRoot);
     const { agentId, issueId } = await seedRunTarget(db, repoRoot);
@@ -419,50 +419,52 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     expect(run).not.toBeNull();
 
     const finishedRun = await waitForRunToFinish(heartbeat, run!.id);
-    expect(finishedRun).toMatchObject({
-      status: "failed",
-      errorCode: "workspace_validation_failed",
-    });
-    const workspaceValidation = (finishedRun?.resultJson as Record<string, unknown> | null)?.workspaceValidation;
-    expect(workspaceValidation).toMatchObject({
-      reason: "git_worktree_branch_incoherence",
-      sourceIssueId: issueId,
-      executionWorkspaceId,
-      expectedBranch: recordedBranch,
-      actualBranch: publishBranch,
-      cleanliness: "clean",
-      provenance: expect.objectContaining({
-        expectedBranchExists: true,
-        actualBranchExists: true,
-        sameHead: false,
-      }),
-      safeRepair: expect.objectContaining({
-        eligible: false,
-        attempted: false,
-        succeeded: false,
-        reason: "expected branch and current HEAD differ",
-      }),
-    });
+    expect(finishedRun).toMatchObject({ status: "succeeded" });
     await waitForRuntimeStateLastRun(db, agentId, run!.id);
     expect(adapterExecute).toHaveBeenCalledTimes(1);
+
+    const operations = await listRunWorkspaceOperations(db, run!.id);
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "worktree_prepare",
+          command: `git checkout ${recordedBranch}`,
+          status: "succeeded",
+          executionWorkspaceId,
+          metadata: expect.objectContaining({
+            branchIncoherenceRepair: true,
+            expectedBranchName: recordedBranch,
+            actualBranchName: publishBranch,
+            executionWorkspaceId,
+            sourceIssueId: issueId,
+          }),
+        }),
+      ]),
+    );
 
     const finalizeOps = await listFinalizeOperations(db, run!.id);
     expect(finalizeOps).toHaveLength(1);
     expect(finalizeOps[0]).toMatchObject({
-      status: "failed",
+      status: "succeeded",
       executionWorkspaceId,
-      stderrExcerpt: expect.stringContaining("Managed git worktree branch check failed"),
     });
     expect(finalizeOps[0]?.metadata).toMatchObject({
       managedGitWorktreeBranch: expect.objectContaining({
         executionWorkspaceId,
-        valid: false,
-        reasonCode: "branch_mismatch",
+        valid: true,
+        reasonCode: null,
         expectedBranchName: recordedBranch,
-        actualBranchName: publishBranch,
+        actualBranchName: recordedBranch,
       }),
-      workspaceValidation: expect.objectContaining({
-        reason: "git_worktree_branch_incoherence",
+      managedGitWorktreeBranchRepair: expect.objectContaining({
+        attempted: true,
+        succeeded: true,
+        initial: expect.objectContaining({
+          valid: false,
+          reasonCode: "branch_mismatch",
+          expectedBranchName: recordedBranch,
+          actualBranchName: publishBranch,
+        }),
       }),
     });
   }, 20_000);

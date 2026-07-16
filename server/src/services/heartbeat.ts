@@ -11578,6 +11578,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                     : null,
                   executionWorkspaceId: branchInspection.workspaceRecord.id,
                   recorder: workspaceOperationRecorder,
+                  // A completed run that legitimately switched branches (e.g.
+                  // shipped a PR from its worktree) must not be retroactively
+                  // failed: take the same safe checkout the prepare path uses.
+                  // The transition stays visible - finalizeBranchRepairMetadata
+                  // records the initial (agent) branch and the repaired state.
+                  allowBranchSwitchRepair: true,
                 });
               } catch (repairErr) {
                 const workspaceValidationFailure = isWorkspaceValidationFailure(repairErr) ? repairErr : null;
