@@ -1394,6 +1394,98 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("rejects assignee adapter override CLI flags foreign to the assignee's adapter type", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { adapterType: "claude_local" });
+      return null;
+    });
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        assigneeAdapterOverrides: {
+          adapterConfig: { extraArgs: ["--skip-git-repo-check"] },
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("--skip-git-repo-check");
+    expect(res.body.error).toContain("claude_local");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows adapter override CLI flags on a matching assignee adapter type", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { adapterType: "codex_local" });
+      return null;
+    });
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        assigneeAdapterOverrides: {
+          adapterConfig: { extraArgs: ["--skip-git-repo-check"] },
+        },
+      })
+      .expect(200);
+
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        assigneeAdapterOverrides: {
+          adapterConfig: { extraArgs: ["--skip-git-repo-check"] },
+        },
+      }),
+    );
+  });
+
+  it("rejects reassigning an issue with adapter overrides to an incompatible adapter type", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === peerAgentId) return makeAgent(peerAgentId, { adapterType: "claude_local" });
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { adapterType: "codex_local" });
+      return null;
+    });
+    mockAgentService.resolveByReference.mockResolvedValue({
+      ambiguous: false,
+      agent: makeAgent(peerAgentId, { adapterType: "claude_local", status: "active" }),
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      assigneeAdapterOverrides: { adapterConfig: { extraArgs: ["--skip-git-repo-check"] } },
+    }));
+    const app = await createApp(boardActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAgentId: peerAgentId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("--skip-git-repo-check");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("does not block unrelated mutations of an issue already carrying a foreign override", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) return makeAgent(ownerAgentId, { adapterType: "claude_local" });
+      return null;
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      assigneeAdapterOverrides: { adapterConfig: { extraArgs: ["--skip-git-repo-check"] } },
+    }));
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "cancelled" })
+      .expect(200);
+
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({ status: "cancelled" }),
+    );
+  });
+
   it("preserves committed issue updates, comments, documents, and work product writes when recovery revalidation fails", async () => {
     const app = await createApp(ownerActor());
 

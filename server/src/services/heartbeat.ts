@@ -203,7 +203,7 @@ import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
-import { extractSkillMentionIds, isPaperclipReservedEnvKey, isUuidLike } from "@paperclipai/shared";
+import { extractSkillMentionIds, findForeignAdapterCliArgs, isPaperclipReservedEnvKey, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
 import { isOsIdentitySshEnvironment } from "./environment-config.js";
@@ -10417,6 +10417,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (modelProfileApplication.requested) context.modelProfile = modelProfileApplication.requested;
     } else {
       delete context.paperclipModelProfile;
+    }
+    // Pre-dispatch gate for issue-level adapterConfig overrides carrying CLI
+    // flags foreign to the assignee's adapter type: the merged argv would
+    // crash the CLI at parse on every run touching the issue (including
+    // review/recovery wakes a cancel does not stop). Fail fast with a named
+    // configuration-incomplete blocker instead. Write-time 422 validation
+    // exists in routes/issues.ts; this catches overrides written before that
+    // guard, imported, or invalidated by a later reassignment.
+    const foreignIssueOverrideArgs = issueAssigneeOverrides?.adapterConfig
+      ? findForeignAdapterCliArgs(agent.adapterType, issueAssigneeOverrides.adapterConfig)
+      : [];
+    if (foreignIssueOverrideArgs.length > 0) {
+      const foreignArg = foreignIssueOverrideArgs[0];
+      throw new ConfigurationIncompleteFailure(
+        `configuration incomplete: issue assigneeAdapterOverrides.adapterConfig.${foreignArg.configKey} ` +
+        `contains "${foreignArg.flag}", which is only valid for adapter type ` +
+        `${foreignArg.validAdapterTypes.join(", ")} (assignee adapter is ${agent.adapterType}); ` +
+        `the run would crash at CLI argument parsing. Clear the override on the issue or ` +
+        `assign a compatible agent.`,
+        {
+          configurationIncomplete: {
+            reason: "issue_adapter_override_foreign_cli_flag",
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issueId ?? null,
+            adapterType: agent.adapterType,
+            configKey: foreignArg.configKey,
+            flag: foreignArg.flag,
+            validAdapterTypes: [...foreignArg.validAdapterTypes],
+          },
+        },
+      );
     }
     const mergedConfig = mergeModelProfileAdapterConfig({
       baseConfig: workspaceManagedConfig,

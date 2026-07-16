@@ -1641,6 +1641,13 @@ export {
 } from "./validators/adapter-registry.js";
 
 export {
+  ADAPTER_CLI_ARG_CONFIG_KEYS,
+  ADAPTER_EXCLUSIVE_CLI_FLAGS,
+  findForeignAdapterCliArgs,
+  type ForeignAdapterCliArgFinding,
+} from "./validators/adapter-args.js";
+
+export {
   environmentCustomImageTemplateKindSchema,
   environmentCustomImageTemplateStatusSchema,
   environmentCustomImageSetupSessionStatusSchema,

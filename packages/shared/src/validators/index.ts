@@ -655,3 +655,10 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./plugin.js";
+
+export {
+  ADAPTER_CLI_ARG_CONFIG_KEYS,
+  ADAPTER_EXCLUSIVE_CLI_FLAGS,
+  findForeignAdapterCliArgs,
+  type ForeignAdapterCliArgFinding,
+} from "./adapter-args.js";

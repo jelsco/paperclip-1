@@ -38,6 +38,7 @@ import {
   createDocumentAnnotationThreadSchema,
   createChildIssueSchema,
   createIssueSchema,
+  findForeignAdapterCliArgs,
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
   feedbackTargetTypeSchema,
@@ -1394,6 +1395,33 @@ export function issueRoutes(
   function throwIssueOsIdentitySelectorMutation(paths: string[]): never {
     throw forbidden(
       `Agents cannot mutate execution boundary selectors for issues assigned to os_identity agents: ${paths.sort().join(", ")}`,
+    );
+  }
+
+  // Issue-level assigneeAdapterOverrides.adapterConfig merges verbatim into the
+  // assignee's dispatch config, so a CLI flag belonging to a different adapter
+  // crashes every run touching the issue at argv parse. Reject it at write time
+  // naming the offending key/flag; the heartbeat pre-dispatch gate covers
+  // overrides that predate this guard or are invalidated by a reassignment.
+  async function assertAssigneeAdapterOverridesValidForAssignee(input: {
+    companyId: string;
+    assigneeAgentId: string | null | undefined;
+    assigneeAdapterOverrides: unknown;
+  }): Promise<void> {
+    const overrides = input.assigneeAdapterOverrides;
+    if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return;
+    const adapterConfig = (overrides as Record<string, unknown>).adapterConfig;
+    if (!adapterConfig || !input.assigneeAgentId) return;
+    const agent = await agentsSvc.getById(input.assigneeAgentId);
+    if (!agent || agent.companyId !== input.companyId) return;
+    const findings = findForeignAdapterCliArgs(agent.adapterType, adapterConfig);
+    if (findings.length === 0) return;
+    const first = findings[0];
+    throw unprocessable(
+      `assigneeAdapterOverrides.adapterConfig.${first.configKey} contains "${first.flag}", ` +
+      `which is only valid for adapter type ${first.validAdapterTypes.join(", ")}; ` +
+      `the assignee agent uses ${agent.adapterType}, so every run touching this issue ` +
+      `would crash at CLI argument parsing. Remove the flag or assign a compatible agent.`,
     );
   }
 
@@ -5389,6 +5417,11 @@ export function issueRoutes(
       companyId,
       rawCreateBody.assigneeAgentId as string | null | undefined,
     );
+    await assertAssigneeAdapterOverridesValidForAssignee({
+      companyId,
+      assigneeAgentId: normalizedAssigneeAgentId ?? (rawCreateBody.assigneeAgentId as string | null | undefined),
+      assigneeAdapterOverrides: rawCreateBody.assigneeAdapterOverrides,
+    });
     const actor = getActorInfo(req);
     const runWorkspaceInheritanceSourceIssueId = hasExplicitIssueWorkspaceCreateSelection(rawCreateBody)
       ? null
@@ -6063,6 +6096,21 @@ export function issueRoutes(
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
       normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId;
+    // Validate only when this PATCH creates the bad combination (writing
+    // overrides, or changing the assignee under existing overrides) - an
+    // untouched bad combination must not block unrelated mutations like a
+    // cancel; the heartbeat pre-dispatch gate covers those issues instead.
+    const writesAssigneeAdapterOverrides =
+      Object.prototype.hasOwnProperty.call(updateFields, "assigneeAdapterOverrides");
+    if (writesAssigneeAdapterOverrides || normalizedAssigneeAgentId !== undefined) {
+      await assertAssigneeAdapterOverridesValidForAssignee({
+        companyId: existing.companyId,
+        assigneeAgentId: requestedAssigneeAgentId,
+        assigneeAdapterOverrides: writesAssigneeAdapterOverrides
+          ? updateFields.assigneeAdapterOverrides
+          : existing.assigneeAdapterOverrides,
+      });
+    }
     if (!(await assertNoIssueOsIdentitySelfReconfiguration({
       req,
       companyId: existing.companyId,

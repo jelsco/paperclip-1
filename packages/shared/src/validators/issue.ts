@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ADAPTER_CLI_ARG_CONFIG_KEYS } from "./adapter-args.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -129,7 +130,22 @@ export const issueAssigneeAdapterOverridesSchema = z
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    // adapterConfig is a freeform record, but arg-carrying keys merge into the
+    // dispatch argv verbatim - a malformed shape crashes the CLI, not the API.
+    for (const key of ADAPTER_CLI_ARG_CONFIG_KEYS) {
+      const raw = value.adapterConfig?.[key];
+      if (raw === undefined || raw === null) continue;
+      if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== "string")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `adapterConfig.${key} must be an array of strings`,
+          path: ["adapterConfig", key],
+        });
+      }
+    }
+  });
 
 const issueExecutionStagePrincipalBaseSchema = z.object({
   type: z.enum(["agent", "user"]),
